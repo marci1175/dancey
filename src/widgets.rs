@@ -123,7 +123,7 @@ impl MusicGrid {
                 painter.rect_filled(rect, 3., style.visuals.extreme_bg_color);
 
                 for x_coord in
-                    (0..(rect.width()) as i32).step_by((500.0 - self.beat_per_minute) as usize)
+                    (0..(rect.right()) as i32).step_by(((rect.width() as f64).clamp(1., f64::MAX) / self.beat_per_minute) as usize)
                 {
                     painter.line(
                         vec![

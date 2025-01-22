@@ -39,7 +39,7 @@ impl App for Application {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
-    
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui_extras::install_image_loaders(ctx);
 
@@ -75,7 +75,7 @@ impl App for Application {
         });
 
         egui::SidePanel::left("media").show_animated(ctx, self.media_panel_is_open, |ui| {
-            ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                 Grid::new("media_table").show(ui, |ui| {
                     for (idx, file) in self.media_files.iter().enumerate() {
                         ui.vertical_centered(|ui| {
