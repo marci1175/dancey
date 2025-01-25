@@ -1,137 +1,214 @@
-const SUPPORTED_TYPES: [&str; 3] = ["wav", "mp3", "flac"];
+// Link the file with the UI and the application's source code.
+pub mod app;
 
-use std::path::PathBuf;
+use egui::{Color32, Pos2, ScrollArea};
 
-use eframe::{App, CreationContext};
-use egui::{vec2, Align2, Color32, FontId, Grid, Pos2, ScrollArea, Slider};
-use widgets::{MusicGrid, SoundNode};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{atomic::AtomicU64, Arc},
+    usize,
+};
 
-mod widgets;
+use derive_more::derive::Debug;
+use egui::{scroll_area::ScrollAreaOutput, Context, Rect, Response, Sense, Stroke, Ui, UiBuilder};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct Application {
-    music_grid: MusicGrid,
-    media_files: Vec<PathBuf>,
-    media_panel_is_open: bool,
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct SoundNode {
+    name: String,
+    samples: (),
+    position: i64,
 }
 
-impl Default for Application {
-    fn default() -> Self {
+impl SoundNode {
+    pub fn new(name: String, position: i64) -> Self {
         Self {
-            music_grid: MusicGrid::new(10),
-            media_files: vec![],
-            media_panel_is_open: false,
+            name,
+            samples: (),
+            position,
         }
+    }
+
+    pub fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
-impl Application {
-    pub fn new(cc: &CreationContext) -> Self {
-        if let Some(storage) = cc.storage {
-            return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
-        }
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct PlaybackLine {
+    pos: Arc<AtomicU64>,
+}
 
-        Default::default()
+impl PlaybackLine {
+    fn start(&mut self, ctx: &Context) {}
+}
+
+#[derive(Default, Debug, Deserialize, Serialize)]
+pub struct ItemGroup<K: Eq + Hash, T> {
+    inner: HashMap<K, Vec<T>>,
+}
+
+impl<K: Eq + Hash, T> ItemGroup<K, T> {
+    pub fn new() -> Self {
+        Self {
+            inner: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, key: K, value: T) {
+        if let Some(group) = self.inner.get_mut(&key) {
+            group.push(value);
+        } else {
+            self.inner.insert(key, vec![value]);
+        }
+    }
+
+    pub fn get(&self, key: K) -> Option<&Vec<T>> {
+        self.inner.get(&key)
     }
 }
 
-impl App for Application {
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, self);
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MusicGrid {
+    scale: f64,
+
+    nodes: ItemGroup<usize, SoundNode>,
+
+    playback_line: PlaybackLine,
+
+    channel_count: usize,
+
+    #[serde(skip)]
+    #[debug(skip)]
+    inner_state: Option<ScrollAreaOutput<()>>,
+
+    beat_per_minute: f64,
+}
+
+impl MusicGrid {
+    pub fn new(channel_count: usize) -> Self {
+        Self {
+            scale: 1.0,
+            nodes: ItemGroup::new(),
+            playback_line: PlaybackLine::default(),
+            channel_count,
+            inner_state: None,
+            beat_per_minute: 100.0,
+        }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui_extras::install_image_loaders(ctx);
+    pub fn show(&mut self, ui: &mut Ui) -> Response {
+        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
-        egui::TopBottomPanel::top("setts").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Add node").clicked() {
-                    self.music_grid
-                        .nodes_mut()
-                        .insert(10, SoundNode::new("Fasz".to_string(), 200));
+        let mut x_offset = 0.;
+        let mut y_offset = 0.;
+
+        if let Some(state) = &self.inner_state {
+            x_offset = state.state.offset.x;
+            y_offset = state.state.offset.y;
+        }
+
+        ui.allocate_new_ui(
+            UiBuilder {
+                max_rect: Some(rect),
+                ..Default::default()
+            },
+            |ui| {
+                let painter = ui.painter();
+
+                let style = ui.ctx().style().clone();
+
+                painter.rect_filled(rect, 3., style.visuals.extreme_bg_color);
+
+                for x_coord in (0..(rect.right()) as i32).step_by(
+                    (((rect.width() as f64) / self.beat_per_minute) as usize).clamp(1, usize::MAX),
+                ) {
+                    painter.line(
+                        vec![
+                            Pos2::new(x_coord as f32 - x_offset, rect.top()),
+                            Pos2::new(x_coord as f32 - x_offset, rect.bottom()),
+                        ],
+                        Stroke::new(2., style.visuals.weak_text_color()),
+                    );
                 }
 
-                if ui.button("Start").clicked() {
-                    let playback_line = self.music_grid.playback_line_mut();
-
-                    playback_line;
+                for y_coord in (0..100 * self.channel_count + 1).step_by(100) {
+                    painter.line(
+                        vec![
+                            Pos2::new(rect.left(), y_coord as f32 - y_offset),
+                            Pos2::new(rect.right(), y_coord as f32 - y_offset),
+                        ],
+                        Stroke::new(2., style.visuals.weak_text_color()),
+                    );
                 }
 
-                if ui.button("Stop").clicked() {
+                let scroll_state = ScrollArea::both().auto_shrink([false, false]).show_rows(
+                    ui,
+                    100.,
+                    self.channel_count + 1,
+                    |ui, row_range| {
+                        for row in row_range {
+                            if let Some(sound_nodes) = self.nodes.get(row) {
+                                for node in sound_nodes {
+                                    let response = ui.allocate_rect(
+                                        Rect::from_min_max(
+                                            Pos2::new(
+                                                node.position as f32,
+                                                (row * 100) as f32 - y_offset,
+                                            ),
+                                            Pos2::new(
+                                                (node.position + 50) as f32,
+                                                ((row + 1) * 100) as f32 - y_offset,
+                                            ),
+                                        ),
+                                        Sense::click(),
+                                    );
 
-                }
-
-                ui.menu_button("Panels", |ui| {
-                    if ui.button("Media Panel").clicked() {
-                        self.media_panel_is_open = !self.media_panel_is_open;
-                    }
-                });
-
-                ui.add(Slider::new(
-                    self.music_grid.beat_per_minute_mut(),
-                    1.0_f64..=495.0_f64,
-                ));
-            });
-        });
-
-        egui::SidePanel::left("media").show_animated(ctx, self.media_panel_is_open, |ui| {
-            ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                Grid::new("media_table").show(ui, |ui| {
-                    for (idx, file) in self.media_files.iter().enumerate() {
-                        ui.vertical_centered(|ui| {
-                            ui.allocate_ui(vec2(100., 100.), |ui| {
-                                ui.image(egui::include_image!("..\\assets\\sound_icon.png"))
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label(file.file_name().unwrap_or_default().to_string_lossy().to_string());
-
-                                ui.menu_button("Settings", |ui| {});
-                            });
-                        });
-
-                        if (idx + 1) % 3 == 0 {
-                            ui.end_row();
+                                    ui.painter().rect_filled(
+                                        Rect::from_min_max(
+                                            Pos2::new(
+                                                node.position as f32,
+                                                (row * 100) as f32 - y_offset,
+                                            ),
+                                            Pos2::new(
+                                                (node.position + 50) as f32,
+                                                ((row + 1) * 100) as f32 - y_offset,
+                                            ),
+                                        ),
+                                        0.,
+                                        Color32::GREEN,
+                                    );
+                                }
+                            }
                         }
-                    }
-                });
-            });
-        });
+                    },
+                );
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.music_grid.show(ui);
+                self.inner_state = Some(scroll_state);
+            },
+        );
 
-            let hovered_files = ctx.input(|reader| reader.raw.clone().hovered_files);
+        response
+    }
 
+    pub fn nodes_mut(&mut self) -> &mut ItemGroup<usize, SoundNode> {
+        &mut self.nodes
+    }
 
-            if !hovered_files.is_empty() {
-                let floating_rect = ui.min_rect().shrink2(vec2(ui.min_rect().width() / 3., ui.min_rect().height() / 3.));
+    pub fn set_scale(&mut self, scale: f64) {
+        self.scale = scale;
+    }
 
-                let is_not_supported_file = hovered_files.iter().any(|hovered_file| !SUPPORTED_TYPES.contains(&hovered_file.path.clone().unwrap_or_default().extension().unwrap_or_default().to_string_lossy().to_string().as_str()));
+    pub fn playback_line_mut(&mut self) -> &mut PlaybackLine {
+        &mut self.playback_line
+    }
 
-                if !is_not_supported_file {
-                    ui.painter().rect_filled(floating_rect, 10., Color32::from_gray(150));
-
-                    ui.painter().text(floating_rect.center(), Align2::CENTER_CENTER, "Add Media files to your Project.", FontId::default(), Color32::BLACK);
-                }
-                else {
-                    ui.painter().rect_filled(floating_rect, 10., Color32::RED);
-
-                    ui.painter().text(floating_rect.center(), Align2::CENTER_CENTER, "Unsupported Media File.", FontId::default(), Color32::BLACK);
-                }
-            }
-
-            let dropped_files = ctx.input(|reader| reader.raw.clone().dropped_files);
-            
-            let are_files_not_supported = dropped_files.iter().any(|hovered_file| !SUPPORTED_TYPES.contains(&hovered_file.path.clone().unwrap_or_default().extension().unwrap_or_default().to_string_lossy().to_string().as_str()));
-
-            if !are_files_not_supported {
-                for dropped_file in dropped_files {
-                    if let Some(path) = dropped_file.path {
-                        self.media_files.push(path);
-                    }
-                }
-            }
-        });
+    pub fn beat_per_minute_mut(&mut self) -> &mut f64 {
+        &mut self.beat_per_minute
     }
 }

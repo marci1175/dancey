@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.95"
 cpal = "0.15.3"
 derive_more = { version = "1.0.0", features = ["debug"] }
 eframe = {version = "0.30.0", features = ["persistence"]}
 egui = "0.30.0"
 egui_extras = {version = "0.30.0", features = ["all_loaders"]}
 egui_plot = "0.30.0"
-rodio = "0.20.1"
+rodio = {version = "0.20.1", features = ["symphonia-all"]}
 serde = "1.0.217"
