@@ -1,7 +1,7 @@
 const SUPPORTED_TYPES: [&str; 3] = ["wav", "mp3", "flac"];
 
 use eframe::{App, CreationContext};
-use egui::{vec2, Align2, Color32, FontId, ScrollArea, Sense, Slider};
+use egui::{vec2, Align2, Color32, FontId, ImageButton, ScrollArea, Sense, Slider};
 use rodio::{OutputStream, OutputStreamHandle, Sink};
 
 use derive_more::derive::Debug;
@@ -20,8 +20,12 @@ pub struct MediaFile {
 }
 
 impl MediaFile {
-    fn new(path: PathBuf, sink: Option<Sink>) -> Self {
+    pub fn new(path: PathBuf, sink: Option<Sink>) -> Self {
         Self { path, sink }
+    }
+
+    pub fn from_path(path: PathBuf) -> Self {
+        Self { path, sink: None }
     }
 }
 
@@ -77,7 +81,7 @@ impl App for Application {
                 if ui.button("Start").clicked() {
                     let playback_line = self.music_grid.playback_line_mut();
 
-                    playback_line;
+                    // playback_line;
                 }
 
                 ui.button("Stop").clicked();
@@ -96,51 +100,102 @@ impl App for Application {
         });
 
         egui::SidePanel::left("media").show_animated(ctx, self.media_panel_is_open, |ui| {
+            ui.add_space(2.);
+            
+            ui.horizontal(|ui| {
+                if ui.button("Add Media").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("Supported audio files", &SUPPORTED_TYPES).pick_file() {
+                        self.media_files.push(MediaFile::from_path(path));
+                    }
+                };
+
+                ui.menu_button("Help", |ui| {
+                    ui.label("Information");
+                    
+                    ui.separator();
+
+                    ui.label("How to use the audio quick preview button:");
+                    ui.label("If there is no audio playing, or it has finished playing the left click will automaticly start playing it again.");
+                    ui.label("If there is already music player a left-click will pause / unpuase it.");
+                    ui.label("The state of the player can be reseted with a right click, which will also stop the music from playing.");
+                });
+            });
+
+            ui.separator();
+
             ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     for media_file in self.media_files.iter_mut() {
-                        ui.horizontal(|ui| {
-                            if let Some((_, output_stream_handle)) = &self.audio_playback {
-                                let image = ui.allocate_ui(vec2(20., 20.), |ui| {
-                                    ui.image(egui::include_image!("..\\assets\\sound_icon.png"));
-                                });
-
-                                let image_interaction = ui.interact(
-                                    image.response.rect,
-                                    ui.unique_id(),
-                                    Sense::click_and_drag(),
-                                );
-
-                                if image_interaction.clicked() {
-                                    if let Some(sink) = &media_file.sink {
-                                        sink.clear();
-                                    } else {
-                                        //Preview the audio, save the sink so that we can use it later
-                                        match playback_file(&media_file.path, output_stream_handle)
-                                        {
-                                            Ok(sink) => {
-                                                media_file.sink = Some(sink);
+                            ui.horizontal(|ui| {
+                                if let Some((_, output_stream_handle)) = &self.audio_playback {
+                                    ui.allocate_ui(vec2(20., 20.), |ui| {
+                                        let image_icon = ui.add(ImageButton::new(egui::include_image!("..\\assets\\sound_icon.png")).tint({
+                                            if let Some(sink) = &media_file.sink {
+                                                if sink.is_paused() {
+                                                    Color32::RED
+                                                }
+                                                else if sink.empty() {
+                                                    Color32::WHITE
+                                                }
+                                                else {
+                                                    Color32::GREEN
+                                                }
                                             }
-                                            Err(err) => {
-                                                dbg!(err);
+                                            else {
+                                                Color32::WHITE
+                                            }
+                                        }));
+                                        
+                                        // If the play button is pressed
+                                        if image_icon.clicked() {
+                                            // If the sink exists check if its paused
+                                            if let Some(sink) = &media_file.sink {
+                                                // If paused play
+                                                if sink.is_paused() {
+                                                    sink.play();
+                                                }
+                                                // If playing pause
+                                                else {
+                                                    sink.pause();
+                                                }
+                                            }
+
+                                            // If the media sink doesnt exist create one.
+                                            // If the sink has finished playing and the play is pressed again, playback the audio and pause it or anything.
+                                            if media_file.sink.is_none() || media_file.sink.as_ref().is_some_and(|sink| sink.empty()) {
+                                                //Preview the audio, save the sink so that we can use it later
+                                                match playback_file(&media_file.path, output_stream_handle)
+                                                {
+                                                    Ok(sink) => {
+                                                        media_file.sink = Some(sink);
+                                                    }
+                                                    Err(err) => {
+                                                        dbg!(err);
+                                                    }
+                                                }
                                             }
                                         }
-                                    }
+
+                                        if image_icon.secondary_clicked() {
+                                            media_file.sink = None;
+                                        }
+                                    });
+
+                                    ctx.request_repaint();
                                 }
-                            }
-
-                            ui.label(
-                                media_file
-                                    .path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .to_string(),
-                            );
-
-                            ui.menu_button("Settings", |ui| {});
-                        });
+                                
+                                ui.label(
+                                    media_file
+                                        .path
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string(),
+                                );
+                            }).response.context_menu(|ui| {
+                                ui.label("Settings");
+                            });
                     }
                 });
         });
@@ -213,7 +268,7 @@ impl App for Application {
             if !are_files_not_supported {
                 for dropped_file in dropped_files {
                     if let Some(path) = dropped_file.path {
-                        self.media_files.push(MediaFile::new(path, None));
+                        self.media_files.push(MediaFile::from_path(path));
                     }
                 }
             }

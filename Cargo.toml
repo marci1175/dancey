@@ -11,5 +11,6 @@ eframe = {version = "0.30.0", features = ["persistence"]}
 egui = "0.30.0"
 egui_extras = {version = "0.30.0", features = ["all_loaders"]}
 egui_plot = "0.30.0"
+rfd = "0.15.2"
 rodio = {version = "0.20.1", features = ["symphonia-all"]}
 serde = "1.0.217"
