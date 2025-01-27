@@ -1,12 +1,14 @@
 const SUPPORTED_TYPES: [&str; 3] = ["wav", "mp3", "flac"];
 
 use eframe::{App, CreationContext};
-use egui::{vec2, Align2, Color32, FontId, ImageButton, ScrollArea, Sense, Slider};
-use rodio::{OutputStream, OutputStreamHandle, Sink};
+use egui::{
+    vec2, Align2, Color32, FontId, ImageButton, Label, Rect, ScrollArea, Sense, Slider
+};
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 
 use derive_more::derive::Debug;
 
-use std::{io::BufReader, path::PathBuf, usize};
+use std::{fs::File, io::BufReader, path::PathBuf, usize};
 
 use crate::{MusicGrid, SoundNode};
 
@@ -27,6 +29,10 @@ impl MediaFile {
     pub fn from_path(path: PathBuf) -> Self {
         Self { path, sink: None }
     }
+
+    pub fn clone_path(&self) -> Self {
+        Self { path: self.path.clone(), sink: None }
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -39,6 +45,9 @@ pub struct Application {
     #[debug(skip)]
     #[serde(skip)]
     audio_playback: Option<(OutputStream, OutputStreamHandle)>,
+    
+    #[serde(skip)]
+    dragged_media: Option<MediaFile>,
 }
 
 impl Default for Application {
@@ -48,6 +57,8 @@ impl Default for Application {
             media_files: vec![],
             media_panel_is_open: false,
             audio_playback: OutputStream::try_default().ok(),
+
+            dragged_media: None
         }
     }
 }
@@ -75,7 +86,7 @@ impl App for Application {
                 if ui.button("Add node").clicked() {
                     self.music_grid
                         .nodes_mut()
-                        .insert(3, SoundNode::new("Fasz".to_string(), 200));
+                        .insert(3, SoundNode::new("Fasz".to_string(), 200, PathBuf::new()));
                 }
 
                 if ui.button("Start").clicked() {
@@ -96,6 +107,10 @@ impl App for Application {
                     self.music_grid.beat_per_minute_mut(),
                     1.0_f64..=495.0_f64,
                 ));
+
+                if ui.button("Clear MusicGrid").clicked() {
+                    self.music_grid.nodes.clear();
+                }
             });
         });
 
@@ -126,7 +141,7 @@ impl App for Application {
             ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    for media_file in self.media_files.iter_mut() {
+                    for (_idx, media_file) in self.media_files.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
                                 if let Some((_, output_stream_handle)) = &self.audio_playback {
                                     ui.allocate_ui(vec2(20., 20.), |ui| {
@@ -146,7 +161,7 @@ impl App for Application {
                                                 Color32::WHITE
                                             }
                                         }));
-                                        
+
                                         // If the play button is pressed
                                         if image_icon.clicked() {
                                             // If the sink exists check if its paused
@@ -165,7 +180,7 @@ impl App for Application {
                                             // If the sink has finished playing and the play is pressed again, playback the audio and pause it or anything.
                                             if media_file.sink.is_none() || media_file.sink.as_ref().is_some_and(|sink| sink.empty()) {
                                                 //Preview the audio, save the sink so that we can use it later
-                                                match playback_file(&media_file.path, output_stream_handle)
+                                                match playback_file(output_stream_handle, media_file.path.clone())
                                                 {
                                                     Ok(sink) => {
                                                         media_file.sink = Some(sink);
@@ -184,19 +199,41 @@ impl App for Application {
 
                                     ctx.request_repaint();
                                 }
+
+                                let file_name = media_file
+                                    .path
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string();
+
+                                let label = ui.add(Label::new(file_name.clone()).selectable(false));
+
+                                let interact = label.interact(Sense::click_and_drag());
                                 
-                                ui.label(
-                                    media_file
-                                        .path
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .to_string(),
-                                );
-                            }).response.context_menu(|ui| {
-                                ui.label("Settings");
+                                if interact.drag_started() {
+                                    self.dragged_media = Some(media_file.clone_path());
+                                }
+
+                                if interact.dragged() {
+                                    // We are able to unwrap, but I dont want to panic no matter what.
+                                    let pointer_pos = ctx.pointer_latest_pos().unwrap_or_default();
+
+                                    egui::Area::new("dropped_sound".into()).show(ctx, |ui| {
+                                        ui.painter().rect_filled(Rect::from_center_size(pointer_pos, vec2(150., 20.)), 5., Color32::GRAY);
+                                        ui.painter().text(pointer_pos, Align2::CENTER_CENTER, file_name.chars().take(20).collect::<String>(), FontId::default(), Color32::BLACK);
+                                    });
+                                }
+
+                                if interact.drag_stopped() {
+                                    let cursor_pos = ctx.pointer_hover_pos().unwrap_or_default();
+
+                                    self.music_grid.nodes_mut().insert((cursor_pos.y / 100.0) as usize, SoundNode::new(file_name, cursor_pos.x as i64, media_file.path.clone()));
+
+                                    self.dragged_media = None;
+                                }
                             });
-                    }
+                        }
                 });
         });
 
@@ -276,12 +313,26 @@ impl App for Application {
     }
 }
 
-pub fn playback_file(path: &PathBuf, stream_handle: &OutputStreamHandle) -> anyhow::Result<Sink> {
-    let sink = rodio::Sink::try_new(stream_handle)?;
-
-    let file = std::fs::File::open(path)?;
-
-    sink.append(rodio::Decoder::new(BufReader::new(file))?);
+pub fn playback_file(stream_handle: &OutputStreamHandle, path: PathBuf) -> anyhow::Result<Sink> {
+    let source = get_source_from_path(&path)?;
+    
+    let sink = create_playbacker(stream_handle, source)?;
 
     Ok(sink)
+}
+
+pub fn create_playbacker(stream_handle: &OutputStreamHandle, source: Decoder<BufReader<File>>) -> anyhow::Result<Sink> {
+    let sink = rodio::Sink::try_new(stream_handle)?;
+
+    sink.append(source);
+
+    Ok(sink)
+}
+
+pub fn get_source_from_path(path: &PathBuf) -> Result<rodio::Decoder<BufReader<std::fs::File>>, anyhow::Error> {
+    let file = std::fs::File::open(path)?;
+ 
+    let source = rodio::Decoder::new(BufReader::new(file))?;
+ 
+    Ok(source)
 }

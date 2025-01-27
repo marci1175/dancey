@@ -1,13 +1,11 @@
 // Link the file with the UI and the application's source code.
 pub mod app;
 
-use egui::{Color32, Pos2, ScrollArea};
+use egui::{epaint::EllipseShape, vec2, Color32, Pos2, ScrollArea};
+use rodio::{Decoder, Source};
 
 use std::{
-    collections::HashMap,
-    hash::Hash,
-    sync::{atomic::AtomicU64, Arc},
-    usize,
+    collections::HashMap, fs::File, hash::Hash, io::{BufReader, Cursor, Seek}, path::PathBuf, sync::{atomic::AtomicU64, Arc}, time::Duration, usize
 };
 
 use derive_more::derive::Debug;
@@ -17,16 +15,30 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct SoundNode {
     name: String,
-    samples: (),
+    #[serde(skip)]
+    #[debug(skip)]
+    samples: Option<Decoder<Cursor<Vec<u8>>>>,
     position: i64,
+
+    duration: Option<Duration>,
 }
 
 impl SoundNode {
-    pub fn new(name: String, position: i64) -> Self {
+    pub fn new(name: String, position: i64, path: PathBuf) -> Self {
+        let mut duration = None;
+        let samples = if let Ok(decoder) = create_decoder(path) {
+            duration = decoder.total_duration();
+
+            Some(decoder)
+        } else {
+            None
+        };
+
         Self {
             name,
-            samples: (),
+            samples,
             position,
+            duration
         }
     }
 
@@ -37,6 +49,16 @@ impl SoundNode {
     pub fn name(&self) -> &str {
         &self.name
     }
+}
+
+fn create_decoder(path: PathBuf) -> anyhow::Result<Decoder<Cursor<Vec<u8>>>> {
+    let file_content: Vec<u8> = std::fs::read(path)?; // Extract the Vec<u8> from the Result
+
+    let cursor = Cursor::new(file_content); // Wrap Vec<u8> in a Cursor
+
+    let decoder = Decoder::new(cursor)?; // Create the Decoder
+
+    Ok(decoder)
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -70,6 +92,40 @@ impl<K: Eq + Hash, T> ItemGroup<K, T> {
 
     pub fn get(&self, key: K) -> Option<&Vec<T>> {
         self.inner.get(&key)
+    }
+
+    pub fn clear(&mut self) {
+        self.inner.clear();
+    }
+}
+
+struct FloatRange<T> {
+    current: T,
+    end: T,
+    step: T,
+}
+
+impl<T> FloatRange<T> {
+    fn new(start: T, end: T, step: T) -> Self {
+        Self {
+            current: start,
+            end,
+            step,
+        }
+    }
+}
+
+impl<T: std::ops::AddAssign + PartialOrd + Copy> Iterator for FloatRange<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current >= self.end {
+            None
+        } else {
+            let result = self.current;
+            self.current += self.step;
+            Some(result)
+        }
     }
 }
 
@@ -113,85 +169,78 @@ impl MusicGrid {
             y_offset = state.state.offset.y;
         }
 
-        ui.allocate_new_ui(
-            UiBuilder {
-                max_rect: Some(rect),
-                ..Default::default()
-            },
-            |ui| {
-                let painter = ui.painter();
+        ui.allocate_new_ui(UiBuilder {
+            max_rect: Some(rect),
+            ..Default::default()
+        }, |ui| {
+            let painter = ui.painter();
 
-                let style = ui.ctx().style().clone();
+            let style = ui.ctx().style().clone();
 
-                painter.rect_filled(rect, 3., style.visuals.extreme_bg_color);
+            painter.rect_filled(rect, 3., style.visuals.extreme_bg_color);
 
-                for x_coord in (0..(rect.right()) as i32).step_by(
-                    (((rect.width() as f64) / self.beat_per_minute) as usize).clamp(1, usize::MAX),
-                ) {
-                    painter.line(
-                        vec![
-                            Pos2::new(x_coord as f32 - x_offset, rect.top()),
-                            Pos2::new(x_coord as f32 - x_offset, rect.bottom()),
-                        ],
-                        Stroke::new(2., style.visuals.weak_text_color()),
-                    );
-                }
+            for x_coord in FloatRange::new(
+                ui.min_rect().left(),
+                rect.right() + {
+                    if let Some(state) = &self.inner_state {
+                        state.state.offset.x
+                    }
+                    else {
+                        0.0
+                    }
+                },
+                (rect.width()) / self.beat_per_minute as f32,
+            ) {
+                painter.line(
+                    vec![
+                        Pos2::new(x_coord as f32 - x_offset, rect.top()),
+                        Pos2::new(x_coord as f32 - x_offset, rect.bottom()),
+                    ],
+                    Stroke::new(2., style.visuals.weak_text_color()),
+                );
+            }
+            
+            for y_coord in FloatRange::new(rect.top(), 100. * self.channel_count as f32 + 1., 100.) {
+                painter.line(
+                    vec![
+                        Pos2::new(rect.left(), y_coord as f32 - y_offset),
+                        Pos2::new(rect.right(), y_coord as f32 - y_offset),
+                    ],
+                    Stroke::new(2., style.visuals.weak_text_color()),
+                );
+            }
 
-                for y_coord in (0..100 * self.channel_count + 1).step_by(100) {
-                    painter.line(
-                        vec![
-                            Pos2::new(rect.left(), y_coord as f32 - y_offset),
-                            Pos2::new(rect.right(), y_coord as f32 - y_offset),
-                        ],
-                        Stroke::new(2., style.visuals.weak_text_color()),
-                    );
-                }
+            let width_per_sec = rect.width() / 60.;
 
-                let scroll_state = ScrollArea::both().auto_shrink([false, false]).show_rows(
-                    ui,
-                    100.,
-                    self.channel_count + 1,
-                    |ui, row_range| {
-                        for row in row_range {
-                            if let Some(sound_nodes) = self.nodes.get(row) {
-                                for node in sound_nodes {
-                                    let response = ui.allocate_rect(
-                                        Rect::from_min_max(
-                                            Pos2::new(
-                                                node.position as f32,
-                                                (row * 100) as f32 - y_offset,
-                                            ),
-                                            Pos2::new(
-                                                (node.position + 50) as f32,
-                                                ((row + 1) * 100) as f32 - y_offset,
-                                            ),
-                                        ),
-                                        Sense::click(),
-                                    );
+            let scroll_state = ScrollArea::both().drag_to_scroll(false).auto_shrink([false, false]).show_rows(
+                ui,
+                100.,
+                self.channel_count + 1,
+                |ui, row_range| {
+                    for row in row_range {
+                        if let Some(sound_nodes) = self.nodes.get(row) {
+                            for node in sound_nodes {
+                                
+                                let audio_node_rect = Rect::from_min_max(
+                                    Pos2::new(node.position as f32 - x_offset, (row * 100) as f32 - y_offset),
+                                    Pos2::new(
+                                        (node.position as f32 + node.duration.unwrap_or_default().as_secs_f32() * width_per_sec) as f32 - x_offset,
+                                        ((row + 1) * 100) as f32 - y_offset,
+                                    ),
+                                );
 
-                                    ui.painter().rect_filled(
-                                        Rect::from_min_max(
-                                            Pos2::new(
-                                                node.position as f32,
-                                                (row * 100) as f32 - y_offset,
-                                            ),
-                                            Pos2::new(
-                                                (node.position + 50) as f32,
-                                                ((row + 1) * 100) as f32 - y_offset,
-                                            ),
-                                        ),
-                                        0.,
-                                        Color32::GREEN,
-                                    );
-                                }
+                                ui.allocate_rect(audio_node_rect, Sense::click());
+
+                                ui.painter()
+                                    .rect_filled(audio_node_rect, 0., Color32::GREEN);
                             }
                         }
-                    },
-                );
+                    }
+                },
+            );
 
-                self.inner_state = Some(scroll_state);
-            },
-        );
+            self.inner_state = Some(scroll_state);
+        });
 
         response
     }
