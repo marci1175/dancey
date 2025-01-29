@@ -2,7 +2,7 @@
 pub mod app;
 
 use egui::{
-    ahash::HashSet, epaint::EllipseShape, vec2, Area, Color32, Pos2, RichText, ScrollArea, Vec2,
+    ahash::HashSet, epaint::EllipseShape, vec2, Align2, Area, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2
 };
 use rodio::{Decoder, Source};
 
@@ -34,13 +34,12 @@ pub struct SoundNode {
     samples: Option<Arc<Decoder<Cursor<Vec<u8>>>>>,
 
     nth_node: i64,
-    position_reference_width: f32,
 
     duration: Option<Duration>,
 }
 
 impl SoundNode {
-    pub fn new(name: String, position: i64, path: PathBuf, position_reference_width: f32) -> Self {
+    pub fn new(name: String, position: i64, path: PathBuf) -> Self {
         let mut duration = None;
         let samples = if let Ok(decoder) = create_decoder(path) {
             duration = decoder.total_duration();
@@ -54,7 +53,6 @@ impl SoundNode {
             name,
             samples,
             nth_node: position,
-            position_reference_width,
             duration,
         }
     }
@@ -235,6 +233,14 @@ impl MusicGrid {
             y_offset = state.state.offset.y;
         }
 
+        let pos_delta = {
+            if let Some(state) = &self.inner_state {
+                state.state.offset
+            } else {
+                Vec2::default()
+            }
+        };
+
         ui.allocate_new_ui(
             UiBuilder {
                 max_rect: Some(rect),
@@ -282,21 +288,15 @@ impl MusicGrid {
                     );
 
                     let channel_rect = Rect::from_min_max(
-                        Pos2::new(rect.left(), y_coord),
-                        Pos2::new(rect.right(), y_coord + 100.),
+                        Pos2::new(rect.left() + x_offset, y_coord),
+                        Pos2::new(rect.right() + x_offset, y_coord + 100.),
                     );
 
                     if let Some(node) = &dropped_node {
-                        let pos_delta = {
-                            if let Some(state) = &self.inner_state {
-                                state.state.offset
-                            } else {
-                                Vec2::default()
-                            }
-                        };
+                        let mouse_pointer = ui.ctx().pointer_hover_pos().unwrap_or_default() + pos_delta;
 
                         if channel_rect
-                            .contains(ui.ctx().pointer_hover_pos().unwrap_or_default() + pos_delta)
+                            .contains(mouse_pointer)
                         {
                             self.nodes.insert(idx + 1, node.clone());
                         }
@@ -306,7 +306,7 @@ impl MusicGrid {
                 let width_per_sec = rect.width() / 60.;
                 let grid_node_width = self.get_grid_node_width();
 
-                let scroll_state = ScrollArea::both().drag_to_scroll(false).show_rows(
+                let scroll_state = ScrollArea::both().auto_shrink([false, false]).drag_to_scroll(false).show_rows(
                     ui,
                     100.,
                     self.channel_count + 1,
@@ -334,8 +334,6 @@ impl MusicGrid {
                                         ),
                                     );
 
-                                    dbg!(audio_node_rect.right());
-
                                     ui.allocate_new_ui(
                                         UiBuilder {
                                             max_rect: Some(audio_node_rect),
@@ -351,10 +349,35 @@ impl MusicGrid {
                                                 Color32::from_gray(100),
                                             );
 
-                                            ui.label(
-                                                RichText::from(node.name.clone())
-                                                    .color(Color32::WHITE),
-                                            )
+                                            let label = ui.add(Label::new(RichText::from(node.name.clone())
+                                            .color(Color32::WHITE)).selectable(false).sense(Sense::drag()));
+
+                                            if label.dragged() {
+                                                // We are able to unwrap, but I dont want to panic no matter what.
+                                                let pointer_pos = ui.ctx().pointer_latest_pos().unwrap_or_default();
+
+                                                egui::Area::new("dropped_sound".into()).show(ui.ctx(), |ui| {
+                                                    ui.painter().rect_filled(Rect::from_center_size(pointer_pos, vec2(150., 20.)), 5., Color32::GRAY);
+                                                    ui.painter().text(pointer_pos, Align2::CENTER_CENTER, node.name.clone(), FontId::default(), Color32::BLACK);
+                                                });
+                                            }
+
+                                            if label.drag_stopped() {
+                                                let new_node = SoundNode {
+                                                    name: node.name.clone(),
+                                                    samples: node.samples.clone(),
+                                                    nth_node: ((ui.ctx().pointer_hover_pos().unwrap_or_default().x - self.grid_rect.left() + pos_delta.x) / (self.grid_rect.width() / self.beat_per_minute as f32))
+                                                    as i64,
+                                                    duration: node.duration.clone(),
+                                                };
+
+                                                self.dnd_sender.send(new_node).unwrap();
+
+                                                //Remove the old node
+                                                sound_nodes.swap_remove(idx);
+                                            }
+
+                                            label
                                             .context_menu(|ui| {
                                                 ui.label("Settings");
 
@@ -398,7 +421,7 @@ impl MusicGrid {
     }
 
     pub fn regsiter_dnd_drop(
-        &mut self,
+        &self,
         file_name: String,
         path: PathBuf,
         cursor_pos: Pos2,
@@ -414,8 +437,15 @@ impl MusicGrid {
             ((cursor_pos.x - self.grid_rect.left() + x_pos_offset) / self.get_grid_node_width())
                 as i64,
             path,
-            self.grid_rect().width(),
         );
+
+        self.dnd_sender.send(node)
+    }
+
+    pub fn regsiter_dnd_drop_from_node(
+        &self,
+        node: SoundNode,
+    ) -> Result<(), std::sync::mpsc::SendError<SoundNode>> {
         self.dnd_sender.send(node)
     }
 

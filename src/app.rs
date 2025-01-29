@@ -91,7 +91,7 @@ impl App for Application {
                 if ui.button("Add node").clicked() {
                     self.music_grid.nodes_mut().insert(
                         3,
-                        SoundNode::new("Fasz".to_string(), 200, PathBuf::new(), music_grid_width),
+                        SoundNode::new("Fasz".to_string(), 200, PathBuf::new()),
                     );
                 }
 
@@ -232,8 +232,6 @@ impl App for Application {
                                 }
 
                                 if interact.drag_stopped() {
-                                    let cursor_pos = ctx.pointer_hover_pos().unwrap_or_default();
-                                    
                                     if let Err(err) = self.music_grid.regsiter_dnd_drop(file_name.clone(), media_file.path.clone(), ctx.pointer_hover_pos().unwrap_or_default()) {
                                         dbg!(err);
                                     }
