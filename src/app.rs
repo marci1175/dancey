@@ -2,7 +2,7 @@ const SUPPORTED_TYPES: [&str; 3] = ["wav", "mp3", "flac"];
 
 use eframe::{App, CreationContext};
 use egui::{
-    vec2, Align2, Color32, FontId, ImageButton, Label, Rect, ScrollArea, Sense, Slider
+    vec2, Align2, Color32, FontId, ImageButton, Label, Rect, Response, ScrollArea, Sense, Slider,
 };
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 
@@ -31,7 +31,10 @@ impl MediaFile {
     }
 
     pub fn clone_path(&self) -> Self {
-        Self { path: self.path.clone(), sink: None }
+        Self {
+            path: self.path.clone(),
+            sink: None,
+        }
     }
 }
 
@@ -39,13 +42,14 @@ impl MediaFile {
 #[serde(default)]
 pub struct Application {
     music_grid: MusicGrid,
+
     media_files: Vec<MediaFile>,
     media_panel_is_open: bool,
 
     #[debug(skip)]
     #[serde(skip)]
     audio_playback: Option<(OutputStream, OutputStreamHandle)>,
-    
+
     #[serde(skip)]
     dragged_media: Option<MediaFile>,
 }
@@ -58,7 +62,7 @@ impl Default for Application {
             media_panel_is_open: false,
             audio_playback: OutputStream::try_default().ok(),
 
-            dragged_media: None
+            dragged_media: None,
         }
     }
 }
@@ -83,10 +87,12 @@ impl App for Application {
 
         egui::TopBottomPanel::top("setts").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                let music_grid_width = self.music_grid.grid_rect().width();
                 if ui.button("Add node").clicked() {
-                    self.music_grid
-                        .nodes_mut()
-                        .insert(3, SoundNode::new("Fasz".to_string(), 200, PathBuf::new()));
+                    self.music_grid.nodes_mut().insert(
+                        3,
+                        SoundNode::new("Fasz".to_string(), 200, PathBuf::new(), music_grid_width),
+                    );
                 }
 
                 if ui.button("Start").clicked() {
@@ -227,8 +233,10 @@ impl App for Application {
 
                                 if interact.drag_stopped() {
                                     let cursor_pos = ctx.pointer_hover_pos().unwrap_or_default();
-
-                                    self.music_grid.nodes_mut().insert((cursor_pos.y / 100.0) as usize, SoundNode::new(file_name, cursor_pos.x as i64, media_file.path.clone()));
+                                    
+                                    if let Err(err) = self.music_grid.regsiter_dnd_drop(file_name.clone(), media_file.path.clone(), ctx.pointer_hover_pos().unwrap_or_default()) {
+                                        dbg!(err);
+                                    }
 
                                     self.dragged_media = None;
                                 }
@@ -315,13 +323,16 @@ impl App for Application {
 
 pub fn playback_file(stream_handle: &OutputStreamHandle, path: PathBuf) -> anyhow::Result<Sink> {
     let source = get_source_from_path(&path)?;
-    
+
     let sink = create_playbacker(stream_handle, source)?;
 
     Ok(sink)
 }
 
-pub fn create_playbacker(stream_handle: &OutputStreamHandle, source: Decoder<BufReader<File>>) -> anyhow::Result<Sink> {
+pub fn create_playbacker(
+    stream_handle: &OutputStreamHandle,
+    source: Decoder<BufReader<File>>,
+) -> anyhow::Result<Sink> {
     let sink = rodio::Sink::try_new(stream_handle)?;
 
     sink.append(source);
@@ -329,10 +340,12 @@ pub fn create_playbacker(stream_handle: &OutputStreamHandle, source: Decoder<Buf
     Ok(sink)
 }
 
-pub fn get_source_from_path(path: &PathBuf) -> Result<rodio::Decoder<BufReader<std::fs::File>>, anyhow::Error> {
+pub fn get_source_from_path(
+    path: &PathBuf,
+) -> Result<rodio::Decoder<BufReader<std::fs::File>>, anyhow::Error> {
     let file = std::fs::File::open(path)?;
- 
+
     let source = rodio::Decoder::new(BufReader::new(file))?;
- 
+
     Ok(source)
 }

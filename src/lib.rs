@@ -1,35 +1,51 @@
 // Link the file with the UI and the application's source code.
 pub mod app;
 
-use egui::{epaint::EllipseShape, vec2, Color32, Pos2, ScrollArea};
+use egui::{
+    ahash::HashSet, epaint::EllipseShape, vec2, Area, Color32, Pos2, RichText, ScrollArea, Vec2,
+};
 use rodio::{Decoder, Source};
 
 use std::{
-    collections::HashMap, fs::File, hash::Hash, io::{BufReader, Cursor, Seek}, path::PathBuf, sync::{atomic::AtomicU64, Arc}, time::Duration, usize
+    collections::HashMap,
+    fs::File,
+    hash::Hash,
+    io::{BufReader, Cursor, Seek},
+    path::PathBuf,
+    sync::{
+        atomic::AtomicU64,
+        mpsc::{channel, Receiver, Sender},
+        Arc,
+    },
+    time::Duration,
+    usize,
 };
 
 use derive_more::derive::Debug;
 use egui::{scroll_area::ScrollAreaOutput, Context, Rect, Response, Sense, Stroke, Ui, UiBuilder};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
 pub struct SoundNode {
     name: String,
+
     #[serde(skip)]
     #[debug(skip)]
-    samples: Option<Decoder<Cursor<Vec<u8>>>>,
-    position: i64,
+    samples: Option<Arc<Decoder<Cursor<Vec<u8>>>>>,
+
+    nth_node: i64,
+    position_reference_width: f32,
 
     duration: Option<Duration>,
 }
 
 impl SoundNode {
-    pub fn new(name: String, position: i64, path: PathBuf) -> Self {
+    pub fn new(name: String, position: i64, path: PathBuf, position_reference_width: f32) -> Self {
         let mut duration = None;
         let samples = if let Ok(decoder) = create_decoder(path) {
             duration = decoder.total_duration();
 
-            Some(decoder)
+            Some(Arc::new(decoder))
         } else {
             None
         };
@@ -37,8 +53,9 @@ impl SoundNode {
         Self {
             name,
             samples,
-            position,
-            duration
+            nth_node: position,
+            position_reference_width,
+            duration,
         }
     }
 
@@ -90,8 +107,19 @@ impl<K: Eq + Hash, T> ItemGroup<K, T> {
         }
     }
 
+    /// If the key does not exist, it will not return any errors.
+    pub fn remove(&mut self, key: &K, idx: usize) {
+        if let Some(group) = self.inner.get_mut(key) {
+            group.swap_remove(idx);
+        }
+    }
+
     pub fn get(&self, key: K) -> Option<&Vec<T>> {
         self.inner.get(&key)
+    }
+
+    pub fn get_mut(&mut self, key: K) -> Option<&mut Vec<T>> {
+        self.inner.get_mut(&key)
     }
 
     pub fn clear(&mut self) {
@@ -130,6 +158,7 @@ impl<T: std::ops::AddAssign + PartialOrd + Copy> Iterator for FloatRange<T> {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct MusicGrid {
     scale: f64,
 
@@ -144,10 +173,38 @@ pub struct MusicGrid {
     inner_state: Option<ScrollAreaOutput<()>>,
 
     beat_per_minute: f64,
+
+    #[serde(skip)]
+    dnd_receiver: Receiver<SoundNode>,
+
+    #[serde(skip)]
+    dnd_sender: Sender<SoundNode>,
+
+    grid_rect: Rect,
+}
+
+impl Default for MusicGrid {
+    fn default() -> Self {
+        let (dnd_sender, dnd_receiver) = channel();
+
+        Self {
+            scale: 1.,
+            nodes: ItemGroup::new(),
+            playback_line: PlaybackLine::default(),
+            channel_count: 1,
+            inner_state: None,
+            beat_per_minute: 100.,
+            dnd_receiver,
+            dnd_sender,
+            grid_rect: Rect::NOTHING,
+        }
+    }
 }
 
 impl MusicGrid {
     pub fn new(channel_count: usize) -> Self {
+        let (dnd_sender, dnd_receiver) = channel();
+
         Self {
             scale: 1.0,
             nodes: ItemGroup::new(),
@@ -155,11 +212,20 @@ impl MusicGrid {
             channel_count,
             inner_state: None,
             beat_per_minute: 100.0,
+            dnd_receiver,
+            dnd_sender,
+            grid_rect: Rect::NOTHING,
         }
+    }
+
+    pub fn get_grid_node_width(&self) -> f32 {
+        self.grid_rect.width() / self.beat_per_minute as f32
     }
 
     pub fn show(&mut self, ui: &mut Ui) -> Response {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+
+        self.grid_rect = rect;
 
         let mut x_offset = 0.;
         let mut y_offset = 0.;
@@ -169,78 +235,148 @@ impl MusicGrid {
             y_offset = state.state.offset.y;
         }
 
-        ui.allocate_new_ui(UiBuilder {
-            max_rect: Some(rect),
-            ..Default::default()
-        }, |ui| {
-            let painter = ui.painter();
+        ui.allocate_new_ui(
+            UiBuilder {
+                max_rect: Some(rect),
+                ..Default::default()
+            },
+            |ui| {
+                let painter = ui.painter();
 
-            let style = ui.ctx().style().clone();
+                let style = ui.ctx().style().clone();
 
-            painter.rect_filled(rect, 3., style.visuals.extreme_bg_color);
+                painter.rect_filled(rect, 3., style.visuals.extreme_bg_color);
 
-            for x_coord in FloatRange::new(
-                ui.min_rect().left(),
-                rect.right() + {
-                    if let Some(state) = &self.inner_state {
-                        state.state.offset.x
-                    }
-                    else {
-                        0.0
-                    }
-                },
-                (rect.width()) / self.beat_per_minute as f32,
-            ) {
-                painter.line(
-                    vec![
-                        Pos2::new(x_coord as f32 - x_offset, rect.top()),
-                        Pos2::new(x_coord as f32 - x_offset, rect.bottom()),
-                    ],
-                    Stroke::new(2., style.visuals.weak_text_color()),
-                );
-            }
-            
-            for y_coord in FloatRange::new(rect.top(), 100. * self.channel_count as f32 + 1., 100.) {
-                painter.line(
-                    vec![
-                        Pos2::new(rect.left(), y_coord as f32 - y_offset),
-                        Pos2::new(rect.right(), y_coord as f32 - y_offset),
-                    ],
-                    Stroke::new(2., style.visuals.weak_text_color()),
-                );
-            }
+                for x_coord in FloatRange::new(
+                    ui.min_rect().left(),
+                    rect.right() + {
+                        if let Some(state) = &self.inner_state {
+                            state.state.offset.x
+                        } else {
+                            0.0
+                        }
+                    },
+                    self.get_grid_node_width(),
+                ) {
+                    painter.line(
+                        vec![
+                            Pos2::new(x_coord as f32 - x_offset, rect.top()),
+                            Pos2::new(x_coord as f32 - x_offset, rect.bottom()),
+                        ],
+                        Stroke::new(2., style.visuals.weak_text_color()),
+                    );
+                }
 
-            let width_per_sec = rect.width() / 60.;
+                let dropped_node = self.dnd_receiver.try_recv().ok();
 
-            let scroll_state = ScrollArea::both().drag_to_scroll(false).auto_shrink([false, false]).show_rows(
-                ui,
-                100.,
-                self.channel_count + 1,
-                |ui, row_range| {
-                    for row in row_range {
-                        if let Some(sound_nodes) = self.nodes.get(row) {
-                            for node in sound_nodes {
-                                
-                                let audio_node_rect = Rect::from_min_max(
-                                    Pos2::new(node.position as f32 - x_offset, (row * 100) as f32 - y_offset),
-                                    Pos2::new(
-                                        (node.position as f32 + node.duration.unwrap_or_default().as_secs_f32() * width_per_sec) as f32 - x_offset,
-                                        ((row + 1) * 100) as f32 - y_offset,
-                                    ),
-                                );
+                for (idx, y_coord) in
+                    FloatRange::new(rect.top(), 100. * self.channel_count as f32 + 1., 100.)
+                        .enumerate()
+                {
+                    painter.line(
+                        vec![
+                            Pos2::new(rect.left(), y_coord as f32 - y_offset),
+                            Pos2::new(rect.right(), y_coord as f32 - y_offset),
+                        ],
+                        Stroke::new(2., style.visuals.weak_text_color()),
+                    );
 
-                                ui.allocate_rect(audio_node_rect, Sense::click());
+                    let channel_rect = Rect::from_min_max(
+                        Pos2::new(rect.left(), y_coord),
+                        Pos2::new(rect.right(), y_coord + 100.),
+                    );
 
-                                ui.painter()
-                                    .rect_filled(audio_node_rect, 0., Color32::GREEN);
+                    if let Some(node) = &dropped_node {
+                        let pos_delta = {
+                            if let Some(state) = &self.inner_state {
+                                state.state.offset
+                            } else {
+                                Vec2::default()
                             }
+                        };
+
+                        if channel_rect
+                            .contains(ui.ctx().pointer_hover_pos().unwrap_or_default() + pos_delta)
+                        {
+                            self.nodes.insert(idx + 1, node.clone());
                         }
                     }
-                },
-            );
+                }
 
-            self.inner_state = Some(scroll_state);
-        });
+                let width_per_sec = rect.width() / 60.;
+                let grid_node_width = self.get_grid_node_width();
+
+                let scroll_state = ScrollArea::both().drag_to_scroll(false).show_rows(
+                    ui,
+                    100.,
+                    self.channel_count + 1,
+                    |ui, row_range| {
+                        for row in row_range {
+                            if let Some(sound_nodes) = self.nodes.get_mut(row) {
+                                for (idx, node) in sound_nodes.clone().iter().enumerate() {
+                                    let scaled_width =
+                                        node.duration.unwrap_or_default().as_secs_f32()
+                                            * width_per_sec;
+
+                                    let nth_node_pos =
+                                        rect.left() + (node.nth_node as f32 * grid_node_width);
+
+                                    let scaled_position = nth_node_pos - x_offset;
+
+                                    let audio_node_rect = Rect::from_min_max(
+                                        Pos2::new(
+                                            scaled_position,
+                                            (row * 100) as f32 - y_offset - 70.,
+                                        ),
+                                        Pos2::new(
+                                            scaled_position + scaled_width,
+                                            ((row + 1) * 100) as f32 - y_offset - 70.,
+                                        ),
+                                    );
+
+                                    dbg!(audio_node_rect.right());
+
+                                    ui.allocate_new_ui(
+                                        UiBuilder {
+                                            max_rect: Some(audio_node_rect),
+                                            ..Default::default()
+                                        },
+                                        |ui| {
+                                            // The reason I allocate this, is to force allocate the width taken up by the rect, so we can navigate accurately between the nodes.
+                                            ui.allocate_space(vec2(ui.available_width(), 1.));
+
+                                            ui.painter().rect_filled(
+                                                audio_node_rect,
+                                                0.,
+                                                Color32::from_gray(100),
+                                            );
+
+                                            ui.label(
+                                                RichText::from(node.name.clone())
+                                                    .color(Color32::WHITE),
+                                            )
+                                            .context_menu(|ui| {
+                                                ui.label("Settings");
+
+                                                ui.separator();
+
+                                                if ui.button("Delete").clicked() {
+                                                    sound_nodes.swap_remove(idx);
+
+                                                    ui.close_menu();
+                                                }
+                                            });
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    },
+                );
+
+                self.inner_state = Some(scroll_state);
+            },
+        );
 
         response
     }
@@ -259,5 +395,31 @@ impl MusicGrid {
 
     pub fn beat_per_minute_mut(&mut self) -> &mut f64 {
         &mut self.beat_per_minute
+    }
+
+    pub fn regsiter_dnd_drop(
+        &mut self,
+        file_name: String,
+        path: PathBuf,
+        cursor_pos: Pos2,
+    ) -> Result<(), std::sync::mpsc::SendError<SoundNode>> {
+        let x_pos_offset = if let Some(state) = &self.inner_state {
+            state.state.offset.x
+        } else {
+            0.0
+        };
+
+        let node = SoundNode::new(
+            file_name,
+            ((cursor_pos.x - self.grid_rect.left() + x_pos_offset) / self.get_grid_node_width())
+                as i64,
+            path,
+            self.grid_rect().width(),
+        );
+        self.dnd_sender.send(node)
+    }
+
+    pub fn grid_rect(&self) -> Rect {
+        self.grid_rect
     }
 }
