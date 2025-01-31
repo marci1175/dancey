@@ -4,13 +4,14 @@ use eframe::{App, CreationContext};
 use egui::{
     vec2, Align2, Color32, FontId, ImageButton, Label, Rect, Response, ScrollArea, Sense, Slider,
 };
+use egui_toast::{Toast, Toasts};
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 
 use derive_more::derive::Debug;
 
 use std::{fs::File, io::BufReader, path::PathBuf, usize};
 
-use crate::{MusicGrid, SoundNode};
+use crate::{playback_file, MusicGrid, SoundNode};
 
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaFile {
@@ -52,6 +53,10 @@ pub struct Application {
 
     #[serde(skip)]
     dragged_media: Option<MediaFile>,
+
+    #[debug(skip)]
+    #[serde(skip)]
+    toasts: Toasts,
 }
 
 impl Default for Application {
@@ -61,7 +66,7 @@ impl Default for Application {
             media_files: vec![],
             media_panel_is_open: false,
             audio_playback: OutputStream::try_default().ok(),
-
+            toasts: Toasts::new(),
             dragged_media: None,
         }
     }
@@ -87,22 +92,6 @@ impl App for Application {
 
         egui::TopBottomPanel::top("setts").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let music_grid_width = self.music_grid.grid_rect().width();
-                if ui.button("Add node").clicked() {
-                    self.music_grid.nodes_mut().insert(
-                        3,
-                        SoundNode::new("Fasz".to_string(), 200, PathBuf::new()),
-                    );
-                }
-
-                if ui.button("Start").clicked() {
-                    let playback_line = self.music_grid.playback_line_mut();
-
-                    // playback_line;
-                }
-
-                ui.button("Stop").clicked();
-
                 ui.menu_button("Panels", |ui| {
                     if ui.button("Media Panel").clicked() {
                         self.media_panel_is_open = !self.media_panel_is_open;
@@ -192,7 +181,7 @@ impl App for Application {
                                                         media_file.sink = Some(sink);
                                                     }
                                                     Err(err) => {
-                                                        dbg!(err);
+                                                        self.toasts.add(Toast::new().kind(egui_toast::ToastKind::Error).text(err.to_string()));
                                                     }
                                                 }
                                             }
@@ -233,7 +222,7 @@ impl App for Application {
 
                                 if interact.drag_stopped() {
                                     if let Err(err) = self.music_grid.regsiter_dnd_drop(file_name.clone(), media_file.path.clone(), ctx.pointer_hover_pos().unwrap_or_default()) {
-                                        dbg!(err);
+                                        self.toasts.add(Toast::new().kind(egui_toast::ToastKind::Error).text(err.to_string()));
                                     }
 
                                     self.dragged_media = None;
@@ -317,33 +306,4 @@ impl App for Application {
             }
         });
     }
-}
-
-pub fn playback_file(stream_handle: &OutputStreamHandle, path: PathBuf) -> anyhow::Result<Sink> {
-    let source = get_source_from_path(&path)?;
-
-    let sink = create_playbacker(stream_handle, source)?;
-
-    Ok(sink)
-}
-
-pub fn create_playbacker(
-    stream_handle: &OutputStreamHandle,
-    source: Decoder<BufReader<File>>,
-) -> anyhow::Result<Sink> {
-    let sink = rodio::Sink::try_new(stream_handle)?;
-
-    sink.append(source);
-
-    Ok(sink)
-}
-
-pub fn get_source_from_path(
-    path: &PathBuf,
-) -> Result<rodio::Decoder<BufReader<std::fs::File>>, anyhow::Error> {
-    let file = std::fs::File::open(path)?;
-
-    let source = rodio::Decoder::new(BufReader::new(file))?;
-
-    Ok(source)
 }

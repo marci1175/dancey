@@ -14,3 +14,6 @@ itertools = "0.14.0"
 rfd = "0.15.2"
 rodio = {version = "0.20.1", features = ["symphonia-all"]}
 serde = "1.0.217"
+parking_lot = {version = "0.12.3", features = ["serde"]}
+symphonia = {version = "0.5.4", features = ["all"]}
+egui-toast = "0.16.0"
