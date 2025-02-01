@@ -2,16 +2,18 @@ const SUPPORTED_TYPES: [&str; 3] = ["wav", "mp3", "flac"];
 
 use eframe::{App, CreationContext};
 use egui::{
-    vec2, Align2, Color32, FontId, ImageButton, Label, Rect, Response, ScrollArea, Sense, Slider,
+    vec2, Align2, Color32, FontId, ImageButton, Label, Rect, RichText, ScrollArea, Sense, Slider,
 };
 use egui_toast::{Toast, Toasts};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+use itertools::Itertools;
+use rodio::{OutputStream, OutputStreamHandle, Sink};
 
 use derive_more::derive::Debug;
+use symphonia::core::codecs::CodecParameters;
 
-use std::{fs::File, io::BufReader, path::PathBuf, usize};
+use std::{path::PathBuf, sync::Arc, usize};
 
-use crate::{playback_file, MusicGrid, SoundNode};
+use crate::{playback_file, MusicGrid, Settings};
 
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaFile {
@@ -49,7 +51,7 @@ pub struct Application {
 
     #[debug(skip)]
     #[serde(skip)]
-    audio_playback: Option<(OutputStream, OutputStreamHandle)>,
+    audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>>,
 
     #[serde(skip)]
     dragged_media: Option<MediaFile>,
@@ -57,17 +59,21 @@ pub struct Application {
     #[debug(skip)]
     #[serde(skip)]
     toasts: Toasts,
+
+    settings: Settings,
 }
 
 impl Default for Application {
     fn default() -> Self {
+        let audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>> = OutputStream::try_default().map(|tuple| Arc::new(tuple)).ok();
         Self {
-            music_grid: MusicGrid::new(10),
+            music_grid: MusicGrid::new(10, audio_playback.clone()),
             media_files: vec![],
             media_panel_is_open: false,
-            audio_playback: OutputStream::try_default().ok(),
+            audio_playback,
             toasts: Toasts::new(),
             dragged_media: None,
+            settings: Settings::default(),
         }
     }
 }
@@ -92,16 +98,68 @@ impl App for Application {
 
         egui::TopBottomPanel::top("setts").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.menu_button("Settings", |ui| {
+                    ScrollArea::vertical().show(ui, |ui| {
+                        ui.label(RichText::from("Audio").strong());
+
+                        ui.label("Master Volume");
+
+                        let mut current_value = self
+                            .settings
+                            .master_audio_percent
+                            .load(std::sync::atomic::Ordering::Relaxed);
+
+                        ui.add(Slider::new(&mut current_value, 0..=255).suffix("%"));
+
+                        self.settings
+                            .master_audio_percent
+                            .store(current_value, std::sync::atomic::Ordering::Relaxed);
+
+                        ui.separator();
+
+                        ui.label(RichText::from("Troubleshooting"));
+
+                        ui.label(format!(
+                            "Current Sample length: {}",
+                            self.music_grid.total_samples
+                        ));
+
+                        if ui.button("Recount sample length").clicked() {
+                            let track_params: Vec<CodecParameters> = self
+                                .music_grid
+                                .nodes
+                                .values()
+                                .map(|values| {
+                                    values
+                                        .iter()
+                                        .map(|node| node.track_params.clone())
+                                        .collect()
+                                })
+                                .concat();
+
+                            match MusicGrid::recount_sample_length(track_params) {
+                                Ok(sample_length) => {
+                                    self.music_grid.total_samples = sample_length;
+                                }
+                                Err(err) => {
+                                    self.toasts.add(
+                                        Toast::new()
+                                            .kind(egui_toast::ToastKind::Error)
+                                            .text(err.to_string()),
+                                    );
+                                }
+                            };
+                        }
+                    });
+                });
+
                 ui.menu_button("Panels", |ui| {
                     if ui.button("Media Panel").clicked() {
                         self.media_panel_is_open = !self.media_panel_is_open;
                     }
                 });
 
-                ui.add(Slider::new(
-                    self.music_grid.beat_per_minute_mut(),
-                    1.0_f64..=495.0_f64,
-                ));
+                ui.add(Slider::new(self.music_grid.beat_per_minute_mut(), 1..=495));
 
                 if ui.button("Clear MusicGrid").clicked() {
                     self.music_grid.nodes.clear();
@@ -136,9 +194,9 @@ impl App for Application {
             ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    for (_idx, media_file) in self.media_files.iter_mut().enumerate() {
+                    for media_file in self.media_files.iter_mut() {
                             ui.horizontal(|ui| {
-                                if let Some((_, output_stream_handle)) = &self.audio_playback {
+                                if let Some((_, output_stream_handle)) = self.audio_playback.as_deref() {
                                     ui.allocate_ui(vec2(20., 20.), |ui| {
                                         let image_icon = ui.add(ImageButton::new(egui::include_image!("..\\assets\\sound_icon.png")).tint({
                                             if let Some(sink) = &media_file.sink {
@@ -156,11 +214,17 @@ impl App for Application {
                                                 Color32::WHITE
                                             }
                                         }));
-
+                                        
+                                        // Set the sink's volume every frame
+                                        if let Some(sink) = &media_file.sink {
+                                            // Set the volume of the sink we are currently iterating over
+                                            sink.set_volume(1. * (self.settings.master_audio_percent.load(std::sync::atomic::Ordering::Relaxed) as f32 / 100.));
+                                        }
+                                        
                                         // If the play button is pressed
                                         if image_icon.clicked() {
                                             // If the sink exists check if its paused
-                                            if let Some(sink) = &media_file.sink {
+                                            if let Some(sink) = &media_file.sink {                                                
                                                 // If paused play
                                                 if sink.is_paused() {
                                                     sink.play();
@@ -186,7 +250,7 @@ impl App for Application {
                                                 }
                                             }
                                         }
-
+                                        
                                         if image_icon.secondary_clicked() {
                                             media_file.sink = None;
                                         }

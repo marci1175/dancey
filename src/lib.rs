@@ -1,32 +1,33 @@
 // Link the file with the UI and the application's source code.
 pub mod app;
 
-use eframe::glow::DEBUG_CALLBACK_FUNCTION;
-use egui::{
-    ahash::HashSet, epaint::EllipseShape, vec2, Align2, Area, Color32, FontId, Label, Pos2,
-    RichText, ScrollArea, Vec2,
+use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2};
+use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink};
+use symphonia::core::{
+    audio::{AudioBuffer, Channels, Signal, SignalSpec},
+    codecs::{CodecParameters, DecoderOptions},
+    conv::IntoSample,
+    formats::FormatOptions,
+    io::MediaSourceStream,
+    meta::MetadataOptions,
+    probe::Hint,
 };
-use parking_lot::Mutex;
-use rodio::{Decoder, OutputStreamHandle, Sink, Source};
-use symphonia::core::{codecs::{CodecParameters, DecoderOptions}, conv::IntoSample, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint, units::TimeBase};
 
 use std::{
     collections::HashMap,
     fs::{self, File},
     hash::Hash,
-    io::{BufReader, Cursor, Seek},
+    io::{BufReader, Cursor},
     path::PathBuf,
     sync::{
-        atomic::AtomicU64,
+        atomic::AtomicU8,
         mpsc::{channel, Receiver, Sender},
         Arc,
     },
-    time::Duration,
-    usize,
 };
 
 use derive_more::derive::Debug;
-use egui::{scroll_area::ScrollAreaOutput, Context, Rect, Response, Sense, Stroke, Ui, UiBuilder};
+use egui::{scroll_area::ScrollAreaOutput, Rect, Response, Sense, Stroke, Ui, UiBuilder};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -35,29 +36,38 @@ pub struct SoundNode {
 
     #[serde(skip)]
     #[debug(skip)]
-    bytes: Cursor<Vec<u8>>,
+    samples: Vec<f32>,
 
-    nth_node: i64,
-    
+    position: i64,
+
     #[serde(skip)]
+    /// !!!
     track_params: CodecParameters,
 
     duration: f64,
+    sample_count: u128,
 }
 
 impl SoundNode {
     pub fn new(name: String, position: i64, path: PathBuf) -> anyhow::Result<Self> {
-        let (bytes, duration, track_params) = parse_audio_file(path)?;
+        let (samples, duration, track_params) = parse_audio_file(path)?;
 
-        Ok(
-            Self {
-                name,
-                bytes,
-                nth_node: position,
-                track_params,
-                duration,
-            }
-        )
+        let sample_count = (track_params
+            .n_frames
+            .ok_or_else(|| anyhow::Error::msg("Input did not contain the n_frames attribute."))?
+            * track_params
+                .channels
+                .ok_or_else(|| anyhow::Error::msg("Input did not contain the channels attribute."))?
+                .count() as u64) as u128;
+
+        Ok(Self {
+            name,
+            samples,
+            position,
+            track_params,
+            duration,
+            sample_count,
+        })
     }
 
     pub fn name_mut(&mut self) -> &mut String {
@@ -69,11 +79,18 @@ impl SoundNode {
     }
 
     pub fn clone_relocate(&self, new_nth_node: i64) -> Self {
-        Self { name: self.name.clone(), bytes: self.bytes.clone(), nth_node: new_nth_node, track_params: self.track_params.clone(), duration: self.duration.clone() }
+        Self {
+            name: self.name.clone(),
+            samples: self.samples.clone(),
+            position: new_nth_node,
+            track_params: self.track_params.clone(),
+            duration: self.duration,
+            sample_count: self.sample_count,
+        }
     }
 }
 
-fn parse_audio_file(path: PathBuf) -> anyhow::Result<(Cursor<Vec<u8>>, f64, CodecParameters)> {
+fn parse_audio_file(path: PathBuf) -> anyhow::Result<(Vec<f32>, f64, CodecParameters)> {
     let bytes = Cursor::new(fs::read(path)?);
 
     let mss = MediaSourceStream::new(Box::new(bytes.clone()), Default::default());
@@ -83,45 +100,92 @@ fn parse_audio_file(path: PathBuf) -> anyhow::Result<(Cursor<Vec<u8>>, f64, Code
     let metadata_opts: MetadataOptions = Default::default();
     let format_opts: FormatOptions = Default::default();
 
-    let probed = symphonia::default::get_probe().format(&hint, mss, &format_opts, &metadata_opts)?;
+    let probed =
+        symphonia::default::get_probe().format(&hint, mss, &format_opts, &metadata_opts)?;
 
-    let format = probed.format;
+    let mut format = probed.format;
 
     let mut tracks = format.tracks().iter();
 
-    let decoder = symphonia::default::get_codecs();
-        
-    let track = tracks.nth(0).ok_or_else(|| anyhow::Error::msg("No tracks were present in the input file."))?;
+    let codec_registry = symphonia::default::get_codecs();
+
+    let track = tracks
+        .next()
+        .ok_or_else(|| anyhow::Error::msg("No tracks were present in the input file."))?;
 
     let decoder_options = DecoderOptions::default();
 
     let track_params = track.codec_params.clone();
 
     let duration = if let Some(time_base) = &track_params.time_base {
-        let duration = time_base.calc_time(track_params.n_frames.ok_or_else(|| anyhow::Error::msg("No frames were present in the input file."))?);
-    
-        duration.seconds as f64 + duration.frac 
+        let duration = time_base.calc_time(
+            track_params
+                .n_frames
+                .ok_or_else(|| anyhow::Error::msg("No frames were present in the input file."))?,
+        );
+
+        duration.seconds as f64 + duration.frac
     } else {
         0.0
     };
 
-    let track_params = decoder.make(&track_params, &decoder_options)?.codec_params().clone();
+    let mut decoder = codec_registry.make(&track_params, &decoder_options)?;
 
-    Ok((bytes, duration, track_params))
-}
+    let mut sample_buffer: Vec<f32> = Vec::new();
 
-#[derive(Default, Debug, Deserialize, Serialize)]
-pub struct ItemGroup<K: Eq + Hash, T> {
-    inner: HashMap<K, Vec<T>>,
-}
+    while let Ok(packet) = &format.next_packet() {
+        let decoded_packet = decoder.decode(packet).unwrap();
 
-impl<K: Eq + Hash, T> ItemGroup<K, T> {
-    pub fn new() -> Self {
-        Self {
-            inner: HashMap::new(),
+        let mut audio_buffer: AudioBuffer<f32> =
+            AudioBuffer::new(decoded_packet.capacity() as u64, *decoded_packet.spec());
+
+        decoded_packet.convert(&mut audio_buffer);
+
+        let (left, right) = audio_buffer.chan_pair_mut(0, 1);
+
+        for (idx, l_sample) in left.iter().enumerate() {
+            sample_buffer.push(*l_sample);
+
+            sample_buffer.push(right[idx]);
         }
     }
 
+    let track_params = decoder.codec_params().clone();
+
+    Ok((sample_buffer, duration, track_params))
+}
+
+/// An [`ItemGroup`] is a list type, which has an underlying [`HashMap`].
+/// A key has a [`Vec<T>`] value, this means that one key can have multiple values.
+#[derive(Default, Debug, Deserialize, Serialize)]
+pub struct ItemGroup<K: Eq + Hash, T> {
+    /// The inner value of the [`ItemGroup`].
+    inner: HashMap<K, Vec<T>>,
+
+    /// A default capacity for a value.
+    /// If this is ```None``` then ```Vec::new()``` is used when creating a new key-value pair.
+    with_capacity: Option<usize>,
+}
+
+impl<K: Eq + Hash, T> ItemGroup<K, T> {
+    /// Creates a new [`ItemGroup`] instance.
+    pub fn new() -> Self {
+        Self {
+            inner: HashMap::new(),
+            with_capacity: None,
+        }
+    }
+
+    /// Creates a new [`ItemGroup`] instance with a default capacity for the values.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: HashMap::new(),
+            with_capacity: Some(capacity),
+        }
+    }
+
+    /// Inserts a value to a value of a key.
+    /// If the key does not exist it automaticly inserts the key and the value into the [`HashMap`].
     pub fn insert(&mut self, key: K, value: T) {
         if let Some(group) = self.inner.get_mut(&key) {
             group.push(value);
@@ -137,16 +201,40 @@ impl<K: Eq + Hash, T> ItemGroup<K, T> {
         }
     }
 
+    /// Returns an immutable reference to a value.
     pub fn get(&self, key: K) -> Option<&Vec<T>> {
         self.inner.get(&key)
     }
 
+    /// Returns a mutable reference to a value.
     pub fn get_mut(&mut self, key: K) -> Option<&mut Vec<T>> {
         self.inner.get_mut(&key)
     }
 
+    /// Clears the [`ItemGroup`]'s inner [`HashMap`],.
     pub fn clear(&mut self) {
         self.inner.clear();
+    }
+
+    /// Returns the count of the keys.
+    pub fn key_len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns the count of the values in the entries.
+    /// Aka returns a sum of the values' length.
+    pub fn value_len(&self) -> usize {
+        self.inner.values().map(|val| val.len()).sum()
+    }
+
+    /// Returns an iterator over all `Vec<T>` values in the `ItemGroup`.
+    pub fn values(&self) -> impl Iterator<Item = &Vec<T>> {
+        self.inner.values()
+    }
+
+    /// Returns a mutable iterator over all `Vec<T>` values in the `ItemGroup`.
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Vec<T>> {
+        self.inner.values_mut()
     }
 }
 
@@ -204,7 +292,7 @@ pub struct MusicGrid {
     inner_state: Option<ScrollAreaOutput<()>>,
 
     /// The beats per minute counter.
-    beat_per_minute: f64,
+    beat_per_minute: u64,
 
     #[serde(skip)]
     /// The receiver part of the Drag and Drop requester.
@@ -214,13 +302,18 @@ pub struct MusicGrid {
     /// The sender part of the Drag and Drop requester.
     dnd_sender: Sender<SoundNode>,
 
-    /// The [`Rect`] where the [`MusicGrid`] widget is displayed.
+    /// The [`Rect`] where the [`MusicGrid`] as a whole is displayed.
     grid_rect: Rect,
 
     /// The total count of samples provided by the tracks. This is used to allocate a buffer which is used to preview the edited sounds/samples.
     /// This is not recounted automaticly (When a drag and drop is initiated), so it can provide inaccurate values.
     /// [`Self::recount_sample_length`] is available for recounting the samples from the Samples.
     total_samples: u128,
+
+    /// !!!!
+    #[serde(skip)]
+    #[debug(skip)]
+    audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>>,
 }
 
 impl Default for MusicGrid {
@@ -232,29 +325,34 @@ impl Default for MusicGrid {
             nodes: ItemGroup::new(),
             track_count: 1,
             inner_state: None,
-            beat_per_minute: 100.,
+            beat_per_minute: 100,
             dnd_receiver,
             dnd_sender,
             grid_rect: Rect::NOTHING,
             total_samples: 0,
+            audio_playback: OutputStream::try_default().map(|tuple| Arc::new(tuple)).ok(),
         }
     }
 }
 
 impl MusicGrid {
-    pub fn new(channel_count: usize) -> Self {
+    pub fn new(
+        track_count: usize,
+        audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>>,
+    ) -> Self {
         let (dnd_sender, dnd_receiver) = channel();
 
         Self {
             scale: 1.0,
             nodes: ItemGroup::new(),
-            track_count: channel_count,
+            track_count,
             inner_state: None,
-            beat_per_minute: 100.0,
+            beat_per_minute: 100,
             dnd_receiver,
             dnd_sender,
             grid_rect: Rect::NOTHING,
             total_samples: 0,
+            audio_playback,
         }
     }
 
@@ -310,8 +408,11 @@ impl MusicGrid {
                 ) {
                     painter.line(
                         vec![
-                            Pos2::new(x_coord as f32 - x_offset, rect.top()),
-                            Pos2::new(x_coord as f32 - x_offset, rect.bottom()),
+                            Pos2::new(x_coord - x_offset, rect.top()),
+                            Pos2::new(
+                                x_coord - x_offset,
+                                (self.track_count) as f32 * 100. + self.grid_rect.top(),
+                            ),
                         ],
                         Stroke::new(2., style.visuals.weak_text_color()),
                     );
@@ -320,13 +421,13 @@ impl MusicGrid {
                 let dropped_node = self.dnd_receiver.try_recv().ok();
 
                 for (idx, y_coord) in
-                    CustomRange::new(rect.top(), 100. * self.track_count as f32 + 1., 100.)
+                    CustomRange::new(rect.top(), 100. * (self.track_count + 1) as f32, 100.)
                         .enumerate()
                 {
                     painter.line(
                         vec![
-                            Pos2::new(rect.left(), y_coord as f32 - y_offset),
-                            Pos2::new(rect.right(), y_coord as f32 - y_offset),
+                            Pos2::new(rect.left(), y_coord - y_offset),
+                            Pos2::new(rect.right(), y_coord - y_offset),
                         ],
                         Stroke::new(2., style.visuals.weak_text_color()),
                     );
@@ -342,6 +443,22 @@ impl MusicGrid {
 
                         if rect_rect.contains(mouse_pointer) {
                             self.nodes.insert(idx + 1, node.clone());
+
+                            // The return type is vec because of rust not cuz it returns all of the track which end last.
+                            if let Some(last_node) = self.nodes.values().max_by_key(|nodes| {
+                                nodes
+                                    .iter()
+                                    .filter_map(|node| {
+                                        Some(
+                                            (node.position as f64
+                                                * (60.0 / self.beat_per_minute as f64)
+                                                + node.duration.ceil())
+                                                as u64,
+                                        )
+                                    })
+                                    .max()
+                                    .unwrap_or(0) // Handle empty node lists
+                            }) {}
                         }
                     }
                 }
@@ -356,12 +473,10 @@ impl MusicGrid {
                         for row in row_range {
                             if let Some(sound_nodes) = self.nodes.get_mut(row) {
                                 for (idx, node) in sound_nodes.clone().iter().enumerate() {
-                                    let scaled_width =
-                                        node.duration as f32
-                                            * width_per_sec;
+                                    let scaled_width = node.duration as f32 * width_per_sec;
 
                                     let nth_node_pos =
-                                        rect.left() + (node.nth_node as f32 * grid_node_width);
+                                        rect.left() + (node.position as f32 * grid_node_width);
 
                                     let scaled_position = nth_node_pos - x_offset;
 
@@ -407,28 +522,58 @@ impl MusicGrid {
                                                     .pointer_latest_pos()
                                                     .unwrap_or_default();
 
-                                                egui::Area::new("dropped_sound".into()).show(ui.ctx(), |ui| {
-                                                    ui.painter().rect_filled(Rect::from_center_size(pointer_pos, vec2(150., 20.)), 5., Color32::GRAY);
-                                                    ui.painter().text(pointer_pos, Align2::CENTER_CENTER, node.name.clone(), FontId::default(), Color32::BLACK);
-                                                });
+                                                egui::Area::new("dropped_sound".into()).show(
+                                                    ui.ctx(),
+                                                    |ui| {
+                                                        ui.painter().rect_filled(
+                                                            Rect::from_center_size(
+                                                                pointer_pos,
+                                                                vec2(150., 20.),
+                                                            ),
+                                                            5.,
+                                                            Color32::GRAY,
+                                                        );
+                                                        ui.painter().text(
+                                                            pointer_pos,
+                                                            Align2::CENTER_CENTER,
+                                                            node.name.clone(),
+                                                            FontId::default(),
+                                                            Color32::BLACK,
+                                                        );
+                                                    },
+                                                );
                                             }
 
                                             if label.drag_stopped() {
-                                                let new_node = node.clone_relocate(((ui
+                                                let pointer_pos = ui
                                                     .ctx()
                                                     .pointer_hover_pos()
-                                                    .unwrap_or_default()
-                                                    .x
-                                                    - self.grid_rect.left()
-                                                    + pos_delta.x)
-                                                    / (self.grid_rect.width()
-                                                        / self.beat_per_minute as f32))
-                                                    as i64);
+                                                    .unwrap_or_default();
 
-                                                self.dnd_sender.send(new_node).unwrap();
+                                                // Check if the dragged sound is dragged to a valid track position and is in the grid's rect.
+                                                // if yes, initiate the relocation.
+                                                let is_pointer_on_invalid_track = pointer_pos.y
+                                                    - self.grid_rect.top()
+                                                    >= (self.track_count as f32 * 100.);
 
-                                                //Remove the old node
-                                                sound_nodes.swap_remove(idx);
+                                                if !is_pointer_on_invalid_track
+                                                    && self.grid_rect.contains(pointer_pos)
+                                                {
+                                                    // Create the new modified node
+                                                    let new_node = node.clone_relocate(
+                                                        ((pointer_pos.x - self.grid_rect.left()
+                                                            + pos_delta.x)
+                                                            / (self.grid_rect.width()
+                                                                / self.beat_per_minute as f32))
+                                                            as i64,
+                                                    );
+
+                                                    // Send it to the Drag and Drop receiver.
+                                                    self.dnd_sender.send(new_node).unwrap();
+
+                                                    //Remove the old node
+                                                    sound_nodes.swap_remove(idx);
+                                                }
                                             }
 
                                             label.context_menu(|ui| {
@@ -436,7 +581,19 @@ impl MusicGrid {
 
                                                 ui.separator();
 
+                                                if ui.button("Play").clicked() {
+                                                    if let Some((_, output_stream_handle)) = self.audio_playback.as_deref() {
+                                                        output_stream_handle.play_raw(SamplesBuffer::new(
+                                                            2,
+                                                            node.track_params.sample_rate.unwrap(),
+                                                            node.samples.clone(),
+                                                        )).unwrap();
+                                                    }
+                                                }
+
                                                 if ui.button("Delete").clicked() {
+                                                    self.total_samples -= node.sample_count;
+
                                                     sound_nodes.swap_remove(idx);
 
                                                     ui.close_menu();
@@ -475,7 +632,7 @@ impl MusicGrid {
 
     /// Mutably gets the beat_per_minute field of [`MusicGrid`].
     /// If this value is modified the grid will automaticly adjust. (This includes adjusting the [`SoundNode`]-s too.)
-    pub fn beat_per_minute_mut(&mut self) -> &mut f64 {
+    pub fn beat_per_minute_mut(&mut self) -> &mut u64 {
         &mut self.beat_per_minute
     }
 
@@ -489,7 +646,12 @@ impl MusicGrid {
         // Iter over all of the samples
         for sample in &samples {
             // Increment sample count
-            sample_count += (sample.n_frames.ok_or_else(|| anyhow::Error::msg("Input did not contain the n_frames attribute."))? * sample.channels.ok_or_else(|| anyhow::Error::msg("Input did not contain the channels attribute."))?.count() as u64) as u128;
+            sample_count += (sample.n_frames.ok_or_else(|| {
+                anyhow::Error::msg("Input did not contain the n_frames attribute.")
+            })? * sample
+                .channels
+                .ok_or_else(|| anyhow::Error::msg("Input did not contain the channels attribute."))?
+                .count() as u64) as u128;
         }
 
         Ok(sample_count)
@@ -499,9 +661,9 @@ impl MusicGrid {
     /// It automaticly calculates the position of the node added. (From cursor_pos)
     pub fn regsiter_dnd_drop(
         &mut self,
-        // Used to create a `SoundNode` instance, which is added to the `MusicGrid` 
+        // Used to create a `SoundNode` instance, which is added to the `MusicGrid`
         file_name: String,
-        // Used to create a `SoundNode` instance, which is added to the `MusicGrid` 
+        // Used to create a `SoundNode` instance, which is added to the `MusicGrid`
         path: PathBuf,
         // This is used to calculate the position of the node.
         cursor_pos: Pos2,
@@ -526,16 +688,13 @@ impl MusicGrid {
 
         // Make sure that when debugging or modify the field we re-measure sample_length, as this implemention is fast but is prone to errors. (Like if the value is manually reset to 0.)
         // A function which will recount this is available: ``
-        self.total_samples += (node.track_params.n_frames.ok_or_else(|| anyhow::Error::msg("Input did not contain the n_frames attribute."))? * node.track_params.channels.ok_or_else(|| anyhow::Error::msg("Input did not contain the channels attribute."))?.count() as u64) as u128;
+        self.total_samples += node.sample_count;
 
         Ok(())
     }
 
-    pub fn regsiter_dnd_drop_from_node(
-        &self,
-        node: SoundNode,
-    ) -> Result<(), std::sync::mpsc::SendError<SoundNode>> {
-        self.dnd_sender.send(node)
+    pub fn regsiter_dnd_drop_from_node(&self, node: SoundNode) -> anyhow::Result<()> {
+        Ok(self.dnd_sender.send(node)?)
     }
 
     pub fn grid_rect(&self) -> Rect {
@@ -570,4 +729,17 @@ pub fn get_source_from_path(
     let source = rodio::Decoder::new(BufReader::new(file))?;
 
     Ok(source)
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Settings {
+    master_audio_percent: Arc<AtomicU8>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            master_audio_percent: Arc::new(AtomicU8::new(100)),
+        }
+    }
 }
