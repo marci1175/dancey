@@ -1,7 +1,10 @@
+#![feature(portable_simd)]
+
 // Link the file with the UI and the application's source code.
 pub mod app;
 
 use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2};
+use itertools::Itertools;
 use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink};
 use symphonia::core::{
     audio::{AudioBuffer, Channels, Signal, SignalSpec},
@@ -14,16 +17,11 @@ use symphonia::core::{
 };
 
 use std::{
-    collections::HashMap,
-    fs::{self, File},
-    hash::Hash,
-    io::{BufReader, Cursor},
-    path::PathBuf,
-    sync::{
+    collections::HashMap, fs::{self, File}, hash::Hash, io::{BufReader, Cursor}, path::PathBuf, simd::{f32x32, Simd}, sync::{
         atomic::AtomicU8,
         mpsc::{channel, Receiver, Sender},
         Arc,
-    },
+    }
 };
 
 use derive_more::derive::Debug;
@@ -45,20 +43,11 @@ pub struct SoundNode {
     track_params: CodecParameters,
 
     duration: f64,
-    sample_count: u128,
 }
 
 impl SoundNode {
     pub fn new(name: String, position: i64, path: PathBuf) -> anyhow::Result<Self> {
         let (samples, duration, track_params) = parse_audio_file(path)?;
-
-        let sample_count = (track_params
-            .n_frames
-            .ok_or_else(|| anyhow::Error::msg("Input did not contain the n_frames attribute."))?
-            * track_params
-                .channels
-                .ok_or_else(|| anyhow::Error::msg("Input did not contain the channels attribute."))?
-                .count() as u64) as u128;
 
         Ok(Self {
             name,
@@ -66,7 +55,6 @@ impl SoundNode {
             position,
             track_params,
             duration,
-            sample_count,
         })
     }
 
@@ -85,7 +73,6 @@ impl SoundNode {
             position: new_nth_node,
             track_params: self.track_params.clone(),
             duration: self.duration,
-            sample_count: self.sample_count,
         }
     }
 }
@@ -314,6 +301,10 @@ pub struct MusicGrid {
     #[serde(skip)]
     #[debug(skip)]
     audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>>,
+
+    last_node: Option<SoundNode>,
+
+    sample_rate: u32,
 }
 
 impl Default for MusicGrid {
@@ -331,6 +322,8 @@ impl Default for MusicGrid {
             grid_rect: Rect::NOTHING,
             total_samples: 0,
             audio_playback: OutputStream::try_default().map(|tuple| Arc::new(tuple)).ok(),
+            last_node: None,
+            sample_rate: 48000,
         }
     }
 }
@@ -353,6 +346,8 @@ impl MusicGrid {
             grid_rect: Rect::NOTHING,
             total_samples: 0,
             audio_playback,
+            last_node: None,
+            sample_rate: 48000,
         }
     }
 
@@ -445,7 +440,7 @@ impl MusicGrid {
                             self.nodes.insert(idx + 1, node.clone());
 
                             // The return type is vec because of rust not cuz it returns all of the track which end last.
-                            if let Some(last_node) = self.nodes.values().max_by_key(|nodes| {
+                            if let Some(last_nodes) = self.nodes.values().max_by_key(|nodes| {
                                 nodes
                                     .iter()
                                     .filter_map(|node| {
@@ -458,7 +453,11 @@ impl MusicGrid {
                                     })
                                     .max()
                                     .unwrap_or(0) // Handle empty node lists
-                            }) {}
+                            }) {
+                                let last_node = last_nodes.last().unwrap().clone();
+
+                                self.last_node = Some(last_node);
+                            }
                         }
                     }
                 }
@@ -592,7 +591,7 @@ impl MusicGrid {
                                                 }
 
                                                 if ui.button("Delete").clicked() {
-                                                    self.total_samples -= node.sample_count;
+                                                    self.total_samples -= node.samples.len() as u128;
 
                                                     sound_nodes.swap_remove(idx);
 
@@ -688,7 +687,7 @@ impl MusicGrid {
 
         // Make sure that when debugging or modify the field we re-measure sample_length, as this implemention is fast but is prone to errors. (Like if the value is manually reset to 0.)
         // A function which will recount this is available: ``
-        self.total_samples += node.sample_count;
+        self.total_samples += node.samples.len() as u128;
 
         Ok(())
     }
@@ -700,6 +699,45 @@ impl MusicGrid {
     pub fn grid_rect(&self) -> Rect {
         self.grid_rect
     }
+
+    pub fn create_preview_samples(&self) -> Vec<f32> {
+        let last_node = self.last_node.clone().unwrap();
+
+        let beat_dur = 60. / self.beat_per_minute as f32;
+
+        let samples_per_beat = self.sample_rate as f32 / beat_dur;
+
+        let total_samples = (last_node.position as f32 * samples_per_beat as f32).ceil() as usize + last_node.samples.len() as usize;
+
+        let mut buffer: Vec<f32> = vec![0.0; total_samples];
+
+        for nodes in self.nodes.values() {
+            for node in nodes {
+                let buffer_part_read = buffer[(node.position * samples_per_beat.ceil() as i64) as usize..((node.position * samples_per_beat.ceil() as i64) as usize + node.samples.len())].to_vec();
+                let buffer_part_write = &mut buffer[(node.position * samples_per_beat.ceil() as i64) as usize..((node.position * samples_per_beat.ceil() as i64) as usize + node.samples.len())];
+
+                let chunks = buffer_part_read.chunks_exact(32);
+
+                for (idx, (buffer_chunk, node_sample_chunk)) in chunks.zip(node.samples.chunks_exact(32)).enumerate() {
+                    let add_result = f32x32::load_or_default(buffer_chunk) + f32x32::load_or_default(node_sample_chunk);
+
+                    let safe_slice = safe_mut_slice(buffer_part_write, idx * 32..((idx + 1) * 32) - 1);
+
+                    safe_slice.copy_from_slice(&add_result.to_array()[0..buffer_chunk.len() - 1]);
+                }
+            }
+        }
+
+        buffer
+    }
+}
+
+fn safe_mut_slice<T>(vec: &mut [T], range: std::ops::Range<usize>) -> &mut [T] {
+    let start = range.start;
+
+    let end = range.end.clamp(start, vec.len() - 1);
+
+    &mut vec[start..end]
 }
 
 pub fn playback_file(stream_handle: &OutputStreamHandle, path: PathBuf) -> anyhow::Result<Sink> {

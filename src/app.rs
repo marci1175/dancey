@@ -6,7 +6,7 @@ use egui::{
 };
 use egui_toast::{Toast, Toasts};
 use itertools::Itertools;
-use rodio::{OutputStream, OutputStreamHandle, Sink};
+use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
 
 use derive_more::derive::Debug;
 use symphonia::core::codecs::CodecParameters;
@@ -163,6 +163,17 @@ impl App for Application {
 
                 if ui.button("Clear MusicGrid").clicked() {
                     self.music_grid.nodes.clear();
+                }
+
+                if ui.button("Play").clicked() {
+                    let samples = self.music_grid.create_preview_samples();
+                    if let Some((_, output_stream_handle)) = self.audio_playback.as_deref() {
+                        output_stream_handle.play_raw(SamplesBuffer::new(
+                            2,
+                            48000,
+                            samples,
+                        )).unwrap();
+                    }
                 }
             });
         });
