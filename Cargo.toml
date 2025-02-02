@@ -16,6 +16,12 @@ parking_lot = {version = "0.12.3", features = ["serde"]}
 symphonia = {version = "0.5.4", features = ["all"]}
 egui-toast = "0.16.0"
 itertools = "0.14.0"
+rubato = "0.16.1"
+criterion = "0.5.1"
+
+[[bench]]
+name = "benchmark"
+harness = false
 
 [profile.release]
 opt-level = "z"  # Optimize for size.

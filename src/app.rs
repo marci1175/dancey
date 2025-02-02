@@ -2,7 +2,7 @@ const SUPPORTED_TYPES: [&str; 3] = ["wav", "mp3", "flac"];
 
 use eframe::{App, CreationContext};
 use egui::{
-    vec2, Align2, Color32, FontId, ImageButton, Label, Rect, RichText, ScrollArea, Sense, Slider,
+    vec2, Align2, Color32, ComboBox, FontId, ImageButton, Label, Rect, RichText, ScrollArea, Sense, Slider
 };
 use egui_toast::{Toast, Toasts};
 use itertools::Itertools;
@@ -65,7 +65,10 @@ pub struct Application {
 
 impl Default for Application {
     fn default() -> Self {
-        let audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>> = OutputStream::try_default().map(|tuple| Arc::new(tuple)).ok();
+        let audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>> =
+            OutputStream::try_default()
+                .map(|tuple| Arc::new(tuple))
+                .ok();
         Self {
             music_grid: MusicGrid::new(10, audio_playback.clone()),
             media_files: vec![],
@@ -117,7 +120,18 @@ impl App for Application {
 
                         ui.separator();
 
-                        ui.label(RichText::from("Troubleshooting"));
+                        ui.label(RichText::from("Playback").strong());
+
+                        ui.label("Master Preview Calculation");
+
+                        ComboBox::new("master_preview_calc_select", "Type").show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.settings.master_sample_playback_type, crate::PlaybackImplementation::Simd, "SIMD");
+                            ui.selectable_value(&mut self.settings.master_sample_playback_type, crate::PlaybackImplementation::NonSimd, "Non-SIMD");
+                        });
+
+                        ui.separator();
+
+                        ui.label(RichText::from("Troubleshooting").strong());
 
                         ui.label(format!(
                             "Current Sample length: {}",
@@ -166,13 +180,19 @@ impl App for Application {
                 }
 
                 if ui.button("Play").clicked() {
-                    let samples = self.music_grid.create_preview_samples();
+                    let samples = match self.settings.master_sample_playback_type {
+                        crate::PlaybackImplementation::Simd => {
+                            self.music_grid.create_preview_samples_simd()
+                        },
+                        crate::PlaybackImplementation::NonSimd => {
+                            self.music_grid.create_preview_samples()
+                        },
+                    };
+
                     if let Some((_, output_stream_handle)) = self.audio_playback.as_deref() {
-                        output_stream_handle.play_raw(SamplesBuffer::new(
-                            2,
-                            48000,
-                            samples,
-                        )).unwrap();
+                        output_stream_handle
+                            .play_raw(SamplesBuffer::new(2, 48000, samples))
+                            .unwrap();
                     }
                 }
             });
