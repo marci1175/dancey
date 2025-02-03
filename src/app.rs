@@ -2,7 +2,7 @@ const SUPPORTED_TYPES: [&str; 3] = ["wav", "mp3", "flac"];
 
 use eframe::{App, CreationContext};
 use egui::{
-    vec2, Align2, Color32, ComboBox, FontId, ImageButton, Label, Rect, RichText, ScrollArea, Sense, Slider
+    vec2, Align2, Color32, ComboBox, FontId, ImageButton, Label, Pos2, Rect, RichText, ScrollArea, Sense, Slider, Stroke
 };
 use egui_toast::{Toast, Toasts};
 use itertools::Itertools;
@@ -235,6 +235,11 @@ impl App for Application {
 
                 if let Some(sink) = &self.master_audio_sink {
                     sink.set_volume(self.settings.master_audio_percent.load(std::sync::atomic::Ordering::Relaxed) as f32 / 100.);
+
+                    // If the sink is empty reset the player
+                    if sink.empty() {
+                        self.master_audio_sink = None;
+                    }
                 }
             });
         });
@@ -370,6 +375,24 @@ impl App for Application {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.music_grid.show(ui);
+            
+            if let Some(sink) = &self.master_audio_sink {
+                let beat_dur = 60. / self.music_grid.beat_per_minute as f32;
+                
+                let secs_elapsed = sink.get_pos().as_secs_f32();
+
+                let x = self.music_grid.grid_rect.left() + (secs_elapsed / beat_dur) * self.music_grid.get_grid_node_width();
+
+                let delta_pos = if let Some(state) = &self.music_grid.inner_state {
+                    state.state.offset
+                }
+                else
+                {
+                    vec2(0., 0.)
+                };
+
+                ui.painter().line(vec![Pos2::new(x - delta_pos.x, self.music_grid.grid_rect.top()), Pos2::new(x - delta_pos.x, self.music_grid.grid_rect.bottom())], Stroke::new(2., Color32::WHITE));
+            }
 
             let hovered_files = ctx.input(|reader| reader.raw.clone().hovered_files);
 

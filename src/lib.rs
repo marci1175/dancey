@@ -475,7 +475,7 @@ impl MusicGrid {
 
                 let width_per_sec = rect.width() / 60.;
                 let grid_node_width = self.get_grid_node_width();
-
+                
                 let scroll_state = ScrollArea::both()
                     .auto_shrink([false, false])
                     .drag_to_scroll(false)
