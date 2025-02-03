@@ -313,7 +313,7 @@ pub struct MusicGrid {
 
     last_node: Option<SoundNode>,
 
-    sample_rate: u32,
+    sample_rate: SampleRate,
 }
 
 impl Default for MusicGrid {
@@ -334,7 +334,7 @@ impl Default for MusicGrid {
                 .map(|tuple| Arc::new(tuple))
                 .ok(),
             last_node: None,
-            sample_rate: 48000,
+            sample_rate: SampleRate::default(),
         }
     }
 }
@@ -358,7 +358,7 @@ impl MusicGrid {
             total_samples: 0,
             audio_playback,
             last_node: None,
-            sample_rate: 48000,
+            sample_rate: SampleRate::default(),
         }
     }
 
@@ -737,26 +737,6 @@ impl MusicGrid {
             // Make sure that when debugging or modify the field we re-measure sample_length, as this implemention is fast but is prone to errors. (Like if the value is manually reset to 0.)
             // A function which will recount this is available: `Self::recount_sample_length()`.
             self.total_samples += node.samples.len() as u128;
-
-            // Update the `last_node` field.
-            if let Some(last_nodes) = self.nodes.values().max_by_key(|nodes| {
-                nodes
-                    .iter()
-                    .filter_map(|node| {
-                        Some(
-                            (node.position as f64
-                                * (60.0 / self.beat_per_minute as f64)
-                                + node.duration.ceil())
-                                as u64,
-                        )
-                    })
-                    .max()
-                    .unwrap_or(0) // Handle empty node lists
-            }) {
-                let last_node = last_nodes.last().unwrap().clone();
-
-                self.last_node = Some(last_node);
-            }
         }
 
         Ok(())
@@ -774,7 +754,7 @@ impl MusicGrid {
 
         let beat_dur = 60. / self.beat_per_minute as f32;
 
-        let samples_per_beat = self.sample_rate as f32 / beat_dur;
+        let samples_per_beat = (self.sample_rate as usize) as f32 / beat_dur;
 
         let total_samples = (last_node.position as f32 * samples_per_beat as f32).ceil() as usize
             + last_node.samples.len() as usize;
@@ -819,7 +799,7 @@ impl MusicGrid {
 
         let beat_dur = 60. / self.beat_per_minute as f32;
 
-        let samples_per_beat = self.sample_rate as f32 / beat_dur;
+        let samples_per_beat = (self.sample_rate as usize) as f32 / beat_dur;
 
         let total_samples = (last_node.position as f32 * samples_per_beat as f32).ceil() as usize
             + last_node.samples.len() as usize;
@@ -916,7 +896,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, Copy)]
 pub enum SampleRate {
     ULow = 32000,
     Low = 41000,

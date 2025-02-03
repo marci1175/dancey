@@ -6,7 +6,7 @@ use egui::{
 };
 use egui_toast::{Toast, Toasts};
 use itertools::Itertools;
-use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
+use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink};
 
 use derive_more::derive::Debug;
 use symphonia::core::codecs::CodecParameters;
@@ -53,6 +53,10 @@ pub struct Application {
     #[serde(skip)]
     audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>>,
 
+    #[debug(skip)]
+    #[serde(skip)]
+    master_audio_sink: Option<Sink>,
+
     #[serde(skip)]
     dragged_media: Option<MediaFile>,
 
@@ -73,6 +77,7 @@ impl Default for Application {
             music_grid: MusicGrid::new(10, audio_playback.clone()),
             media_files: vec![],
             media_panel_is_open: false,
+            master_audio_sink: None,
             audio_playback,
             toasts: Toasts::new(),
             dragged_media: None,
@@ -118,13 +123,26 @@ impl App for Application {
                             .master_audio_percent
                             .store(current_value, std::sync::atomic::Ordering::Relaxed);
 
+                        ui.label("Sample Rate");
+
+                        ComboBox::new("sample_rate", "Hz").selected_text((self.music_grid.sample_rate as usize).to_string()).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.music_grid.sample_rate, crate::SampleRate::ULow, (crate::SampleRate::ULow as usize).to_string());
+                            ui.selectable_value(&mut self.music_grid.sample_rate, crate::SampleRate::Low, (crate::SampleRate::Low as usize).to_string());
+                            ui.selectable_value(&mut self.music_grid.sample_rate, crate::SampleRate::Medium, (crate::SampleRate::Medium as usize).to_string());
+                            ui.selectable_value(&mut self.music_grid.sample_rate, crate::SampleRate::High, (crate::SampleRate::High as usize).to_string());
+                            ui.selectable_value(&mut self.music_grid.sample_rate, crate::SampleRate::Ultra, (crate::SampleRate::Ultra as usize).to_string());
+                        });
+
                         ui.separator();
 
                         ui.label(RichText::from("Playback").strong());
 
                         ui.label("Master Preview Calculation");
 
-                        ComboBox::new("master_preview_calc_select", "Type").show_ui(ui, |ui| {
+                        ComboBox::new("master_preview_calc_select", "Type").selected_text(match self.settings.master_sample_playback_type {
+                            crate::PlaybackImplementation::Simd => "SIMD",
+                            crate::PlaybackImplementation::NonSimd => "Non-SIMD",
+                        }).show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.settings.master_sample_playback_type, crate::PlaybackImplementation::Simd, "SIMD");
                             ui.selectable_value(&mut self.settings.master_sample_playback_type, crate::PlaybackImplementation::NonSimd, "Non-SIMD");
                         });
@@ -179,21 +197,44 @@ impl App for Application {
                     self.music_grid.nodes.clear();
                 }
 
-                if ui.button("Play").clicked() {
-                    let samples = match self.settings.master_sample_playback_type {
-                        crate::PlaybackImplementation::Simd => {
-                            self.music_grid.create_preview_samples_simd()
-                        },
-                        crate::PlaybackImplementation::NonSimd => {
-                            self.music_grid.create_preview_samples()
-                        },
-                    };
-
-                    if let Some((_, output_stream_handle)) = self.audio_playback.as_deref() {
-                        output_stream_handle
-                            .play_raw(SamplesBuffer::new(2, 48000, samples))
-                            .unwrap();
+                if let Some(sink) = &self.master_audio_sink {
+                    if ui.button(match sink.is_paused() {
+                        true => "Unpause",
+                        false => "Pause",
+                    }).clicked() {
+                        if sink.is_paused() {
+                            sink.play();
+                        }
+                        else {
+                            sink.pause();
+                        } 
                     }
+                }
+                else {
+                    if ui.button("Play").clicked() {
+                        let sink = Sink::try_new(&self.audio_playback.as_ref().unwrap().1).unwrap();
+                        
+                        let samples = match self.settings.master_sample_playback_type {
+                            crate::PlaybackImplementation::Simd => {
+                                self.music_grid.create_preview_samples_simd()
+                            },
+                            crate::PlaybackImplementation::NonSimd => {
+                                self.music_grid.create_preview_samples()
+                            },
+                        };
+
+                        sink.append(SamplesBuffer::new(2, self.music_grid.sample_rate as u32, samples));
+
+                        self.master_audio_sink = Some(sink);
+                    }
+                }
+
+                if ui.button("Stop").clicked() {
+                    self.master_audio_sink = None;
+                }
+
+                if let Some(sink) = &self.master_audio_sink {
+                    sink.set_volume(self.settings.master_audio_percent.load(std::sync::atomic::Ordering::Relaxed) as f32 / 100.);
                 }
             });
         });
