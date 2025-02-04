@@ -52,7 +52,12 @@ pub struct SoundNode {
 }
 
 impl SoundNode {
-    pub fn new(name: String, position: i64, path: PathBuf, sample_rate: usize) -> anyhow::Result<Self> {
+    pub fn new(
+        name: String,
+        position: i64,
+        path: PathBuf,
+        sample_rate: usize,
+    ) -> anyhow::Result<Self> {
         let (samples, duration, track_params) = parse_audio_file(path, sample_rate)?;
 
         Ok(Self {
@@ -83,7 +88,10 @@ impl SoundNode {
     }
 }
 
-fn parse_audio_file(path: PathBuf, sample_rate: usize) -> anyhow::Result<(Vec<f32>, f64, CodecParameters)> {
+fn parse_audio_file(
+    path: PathBuf,
+    sample_rate: usize,
+) -> anyhow::Result<(Vec<f32>, f64, CodecParameters)> {
     let bytes = Cursor::new(fs::read(path)?);
 
     let mss = MediaSourceStream::new(Box::new(bytes.clone()), Default::default());
@@ -127,7 +135,7 @@ fn parse_audio_file(path: PathBuf, sample_rate: usize) -> anyhow::Result<(Vec<f3
     let mut sample_buffer: Vec<f32> = Vec::new();
 
     // let mut resampler: FftFixedInOut<f32> = rubato::FftFixedInOut::new(track_params.sample_rate.unwrap() as usize, sample_rate, track_params.n_frames.unwrap() as usize, 2)?;
-    
+
     while let Ok(packet) = &format.next_packet() {
         let decoded_packet = decoder.decode(packet).unwrap();
 
@@ -137,7 +145,7 @@ fn parse_audio_file(path: PathBuf, sample_rate: usize) -> anyhow::Result<(Vec<f3
         decoded_packet.convert(&mut audio_buffer);
 
         let (left, right) = audio_buffer.chan_pair_mut(0, 1);
-        
+
         for (idx, l_sample) in left.iter().enumerate() {
             sample_buffer.push(*l_sample);
 
@@ -475,7 +483,7 @@ impl MusicGrid {
 
                 let width_per_sec = rect.width() / 60.;
                 let grid_node_width = self.get_grid_node_width();
-                
+
                 let scroll_state = ScrollArea::both()
                     .auto_shrink([false, false])
                     .drag_to_scroll(false)
@@ -651,10 +659,8 @@ impl MusicGrid {
                 .iter()
                 .filter_map(|node| {
                     Some(
-                        (node.position as f64
-                            * (60.0 / self.beat_per_minute as f64)
-                            + node.duration.ceil())
-                            as u64,
+                        (node.position as f64 * (60.0 / self.beat_per_minute as f64)
+                            + node.duration.ceil()) as u64,
                     )
                 })
                 .max()
@@ -768,7 +774,7 @@ impl MusicGrid {
                     ..((node.position * samples_per_beat.ceil() as i64) as usize
                         + node.samples.len())]
                     .to_vec();
-                
+
                 let buffer_part_write = &mut buffer[(node.position * samples_per_beat.ceil() as i64)
                     as usize
                     ..((node.position * samples_per_beat.ceil() as i64) as usize
@@ -813,7 +819,7 @@ impl MusicGrid {
                     ..((node.position * samples_per_beat.ceil() as i64) as usize
                         + node.samples.len())]
                     .to_vec();
-                
+
                 let buffer_part_write = &mut buffer[(node.position * samples_per_beat.ceil() as i64)
                     as usize
                     ..((node.position * samples_per_beat.ceil() as i64) as usize

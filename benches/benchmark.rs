@@ -6,11 +6,35 @@ use dancey::{MusicGrid, SoundNode};
 fn bench_create_preview_samples(c: &mut Criterion) {
     let mut music_grid = MusicGrid::new(10, None);
     *music_grid.beat_per_minute_mut() = 100;
-    
-    let sound_node = SoundNode::new("soundnode1".to_string(), 1, PathBuf::from("benches\\sounds\\1.mp3"), 48000).unwrap();
-    let sound_node1 = SoundNode::new("soundnode2".to_string(), 1, PathBuf::from("benches\\sounds\\2.mp3"), 48000).unwrap();
-    let sound_node2 = SoundNode::new("soundnode3".to_string(), 1, PathBuf::from("benches\\sounds\\3.mp3"), 48000).unwrap();
-    let sound_node3 = SoundNode::new("soundnode4".to_string(), 1, PathBuf::from("benches\\sounds\\4.mp3"), 48000).unwrap();
+
+    let sound_node = SoundNode::new(
+        "soundnode1".to_string(),
+        1,
+        PathBuf::from("benches\\sounds\\1.mp3"),
+        48000,
+    )
+    .unwrap();
+    let sound_node1 = SoundNode::new(
+        "soundnode2".to_string(),
+        1,
+        PathBuf::from("benches\\sounds\\2.mp3"),
+        48000,
+    )
+    .unwrap();
+    let sound_node2 = SoundNode::new(
+        "soundnode3".to_string(),
+        1,
+        PathBuf::from("benches\\sounds\\3.mp3"),
+        48000,
+    )
+    .unwrap();
+    let sound_node3 = SoundNode::new(
+        "soundnode4".to_string(),
+        1,
+        PathBuf::from("benches\\sounds\\4.mp3"),
+        48000,
+    )
+    .unwrap();
 
     music_grid.insert_node(1, sound_node);
     music_grid.insert_node(2, sound_node1);
