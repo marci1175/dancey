@@ -181,40 +181,6 @@ impl App for Application {
                             });
 
                         ui.separator();
-
-                        ui.label(RichText::from("Troubleshooting").strong());
-
-                        ui.label(format!(
-                            "Current Sample length: {}",
-                            self.music_grid.total_samples
-                        ));
-
-                        if ui.button("Recount sample length").clicked() {
-                            let track_params: Vec<CodecParameters> = self
-                                .music_grid
-                                .nodes
-                                .values()
-                                .map(|values| {
-                                    values
-                                        .iter()
-                                        .map(|node| node.track_params.clone())
-                                        .collect()
-                                })
-                                .concat();
-
-                            match MusicGrid::recount_sample_length(track_params) {
-                                Ok(sample_length) => {
-                                    self.music_grid.total_samples = sample_length;
-                                }
-                                Err(err) => {
-                                    self.toasts.add(
-                                        Toast::new()
-                                            .kind(egui_toast::ToastKind::Error)
-                                            .text(err.to_string()),
-                                    );
-                                }
-                            };
-                        }
                     });
                 });
 

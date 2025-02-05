@@ -5,11 +5,9 @@ pub mod app;
 
 use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2};
 use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink};
-use rubato::FftFixedInOut;
 use symphonia::core::{
     audio::{AudioBuffer, Channels, Signal, SignalSpec},
     codecs::{CodecParameters, DecoderOptions},
-    conv::IntoSample,
     formats::FormatOptions,
     io::MediaSourceStream,
     meta::MetadataOptions,
@@ -105,14 +103,17 @@ fn parse_audio_file(
         symphonia::default::get_probe().format(&hint, mss, &format_opts, &metadata_opts)?;
 
     let mut format = probed.format;
-
+    
+    
     let mut tracks = format.tracks().iter();
-
+    
     let codec_registry = symphonia::default::get_codecs();
-
+    
     let track = tracks
-        .next()
-        .ok_or_else(|| anyhow::Error::msg("No tracks were present in the input file."))?;
+    .next()
+    .ok_or_else(|| anyhow::Error::msg("No tracks were present in the input file."))?;
+
+    let original_sample_rate = track.codec_params.sample_rate.unwrap();
 
     let decoder_options = DecoderOptions::default();
 
@@ -134,28 +135,39 @@ fn parse_audio_file(
 
     let mut sample_buffer: Vec<f32> = Vec::new();
 
-    // let mut resampler: FftFixedInOut<f32> = rubato::FftFixedInOut::new(track_params.sample_rate.unwrap() as usize, sample_rate, track_params.n_frames.unwrap() as usize, 2)?;
-
+    
     while let Ok(packet) = &format.next_packet() {
         let decoded_packet = decoder.decode(packet).unwrap();
-
+        
         let mut audio_buffer: AudioBuffer<f32> =
-            AudioBuffer::new(decoded_packet.capacity() as u64, *decoded_packet.spec());
-
+        AudioBuffer::new(decoded_packet.capacity() as u64, *decoded_packet.spec());
+        
         decoded_packet.convert(&mut audio_buffer);
-
+        
         let (left, right) = audio_buffer.chan_pair_mut(0, 1);
-
+        
         for (idx, l_sample) in left.iter().enumerate() {
             sample_buffer.push(*l_sample);
-
+            
             sample_buffer.push(right[idx]);
         }
     }
 
+    let output_buffer = if sample_rate != original_sample_rate as usize {
+        let buffer: fon::Audio<fon::chan::Ch32, 2> = fon::Audio::with_f32_buffer(original_sample_rate, sample_buffer.clone());
+
+        let mut out_buffer: fon::Audio<fon::chan::Ch32, 2> = fon::Audio::with_audio(sample_rate as u32, &buffer);
+
+        out_buffer.as_f32_slice().to_vec()
+    }
+    else {
+        sample_buffer.clone()
+    };
+    
+
     let track_params = decoder.codec_params().clone();
 
-    Ok((sample_buffer, duration, track_params))
+    Ok((output_buffer, duration, track_params))
 }
 
 /// An [`ItemGroup`] is a list type, which has an underlying [`HashMap`].
@@ -308,11 +320,6 @@ pub struct MusicGrid {
     /// The [`Rect`] where the [`MusicGrid`] as a whole is displayed.
     grid_rect: Rect,
 
-    /// The total count of samples provided by the tracks. This is used to allocate a buffer which is used to preview the edited sounds/samples.
-    /// This is not recounted automaticly (When a drag and drop is initiated), so it can provide inaccurate values.
-    /// [`Self::recount_sample_length`] is available for recounting the samples from the Samples.
-    total_samples: u128,
-
     #[serde(skip)]
     #[debug(skip)]
     /// Audio playback handle for the [`MusicGrid`]. This is what the [`MusicGrid`] uses for outputting audio.
@@ -337,7 +344,6 @@ impl Default for MusicGrid {
             dnd_receiver,
             dnd_sender,
             grid_rect: Rect::NOTHING,
-            total_samples: 0,
             audio_playback: OutputStream::try_default()
                 .map(|tuple| Arc::new(tuple))
                 .ok(),
@@ -363,7 +369,6 @@ impl MusicGrid {
             dnd_receiver,
             dnd_sender,
             grid_rect: Rect::NOTHING,
-            total_samples: 0,
             audio_playback,
             last_node: None,
             sample_rate: SampleRate::default(),
@@ -616,9 +621,6 @@ impl MusicGrid {
                                                 }
 
                                                 if ui.button("Delete").clicked() {
-                                                    self.total_samples -=
-                                                        node.samples.len() as u128;
-
                                                     sound_nodes.swap_remove(idx);
 
                                                     ui.close_menu();
@@ -739,10 +741,6 @@ impl MusicGrid {
 
             // We should first send the node, and only then increment the inner counter.
             self.dnd_sender.send(node.clone())?;
-
-            // Make sure that when debugging or modify the field we re-measure sample_length, as this implemention is fast but is prone to errors. (Like if the value is manually reset to 0.)
-            // A function which will recount this is available: `Self::recount_sample_length()`.
-            self.total_samples += node.samples.len() as u128;
         }
 
         Ok(())
@@ -755,12 +753,11 @@ impl MusicGrid {
     /// Adds together all the samples from the [`MusicGrid`] with correct placement.
     /// This implementation uses SIMD (Single instruction, multiple data) instructions to further speed up the process.
     /// These SIMD intructions may cause compatiblity issues, the user can choose whether to use a Non-SIMD implementation.
+    /// Do not and Im saying do NOT touch the code calculating the sample count, etc...
     pub fn create_preview_samples_simd(&self) -> Vec<f32> {
         let last_node = self.last_node.clone().unwrap();
 
-        let beat_dur = 60. / self.beat_per_minute as f32;
-
-        let samples_per_beat = (self.sample_rate as usize) as f32 / beat_dur;
+        let samples_per_beat = ((self.sample_rate as u64 * 60) / self.beat_per_minute) * 2;
 
         let total_samples = (last_node.position as f32 * samples_per_beat as f32).ceil() as usize
             + last_node.samples.len() as usize;
@@ -769,15 +766,15 @@ impl MusicGrid {
 
         for nodes in self.nodes.values() {
             for node in nodes {
-                let buffer_part_read = buffer[(node.position * samples_per_beat.ceil() as i64)
+                let buffer_part_read = buffer[(node.position as u64 * samples_per_beat)
                     as usize
-                    ..((node.position * samples_per_beat.ceil() as i64) as usize
+                    ..((node.position as u64 * samples_per_beat) as usize
                         + node.samples.len())]
                     .to_vec();
 
-                let buffer_part_write = &mut buffer[(node.position * samples_per_beat.ceil() as i64)
+                let buffer_part_write = &mut buffer[(node.position as u64 * samples_per_beat)
                     as usize
-                    ..((node.position * samples_per_beat.ceil() as i64) as usize
+                    ..((node.position as u64 * samples_per_beat) as usize
                         + node.samples.len())];
 
                 let chunks = buffer_part_read.chunks_exact(32);
