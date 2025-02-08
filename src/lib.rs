@@ -6,7 +6,7 @@ pub mod app;
 use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2};
 use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink};
 use symphonia::core::{
-    audio::{AudioBuffer, Channels, Signal, SignalSpec},
+    audio::{AudioBuffer, Signal},
     codecs::{CodecParameters, DecoderOptions},
     formats::FormatOptions,
     io::MediaSourceStream,
@@ -20,7 +20,7 @@ use std::{
     hash::Hash,
     io::{BufReader, Cursor},
     path::PathBuf,
-    simd::{f32x32, Simd},
+    simd::f32x32,
     sync::{
         atomic::AtomicU8,
         mpsc::{channel, Receiver, Sender},
@@ -164,7 +164,6 @@ fn parse_audio_file(
         sample_buffer.clone()
     };
     
-
     let track_params = decoder.codec_params().clone();
 
     Ok((output_buffer, duration, track_params))
@@ -345,7 +344,7 @@ impl Default for MusicGrid {
             dnd_sender,
             grid_rect: Rect::NOTHING,
             audio_playback: OutputStream::try_default()
-                .map(|tuple| Arc::new(tuple))
+                .map(Arc::new)
                 .ok(),
             last_node: None,
             sample_rate: SampleRate::default(),
@@ -760,7 +759,7 @@ impl MusicGrid {
         let samples_per_beat = ((self.sample_rate as u64 * 60) / self.beat_per_minute) * 2;
 
         let total_samples = (last_node.position as f32 * samples_per_beat as f32).ceil() as usize
-            + last_node.samples.len() as usize;
+            + last_node.samples.len();
 
         let mut buffer: Vec<f32> = vec![0.0; total_samples];
 
@@ -804,8 +803,8 @@ impl MusicGrid {
 
         let samples_per_beat = (self.sample_rate as usize) as f32 / beat_dur;
 
-        let total_samples = (last_node.position as f32 * samples_per_beat as f32).ceil() as usize
-            + last_node.samples.len() as usize;
+        let total_samples = (last_node.position as f32 * samples_per_beat).ceil() as usize
+            + last_node.samples.len();
 
         let mut buffer: Vec<f32> = vec![0.0; total_samples];
 
@@ -914,4 +913,37 @@ pub enum PlaybackImplementation {
     #[default]
     Simd,
     NonSimd,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LazyBuffer<T> {
+    chunk_size: usize,
+
+    inner_counter: usize,
+
+    inner_buffer: Vec<T>
+}
+
+impl<T> Default for LazyBuffer<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> LazyBuffer<T> {
+    pub fn new() -> Self {
+        Self { chunk_size: 256, inner_counter: 0, inner_buffer: Vec::new() }
+    }
+
+    pub fn get_chunk(&self) -> &[T] {
+        &self.inner_buffer[self.inner_counter..self.inner_counter + self.chunk_size]
+    }
+    
+    pub fn chunk_size_mut(&mut self) -> &mut usize {
+        &mut self.chunk_size
+    }
+    
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
 }

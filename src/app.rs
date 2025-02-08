@@ -7,10 +7,9 @@ use egui::{
 };
 use egui_toast::{Toast, Toasts};
 use itertools::Itertools;
-use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink};
+use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
 
 use derive_more::derive::Debug;
-use symphonia::core::codecs::CodecParameters;
 
 use std::{path::PathBuf, sync::Arc, usize};
 
@@ -72,7 +71,7 @@ impl Default for Application {
     fn default() -> Self {
         let audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>> =
             OutputStream::try_default()
-                .map(|tuple| Arc::new(tuple))
+                .map(Arc::new)
                 .ok();
         Self {
             music_grid: MusicGrid::new(10, audio_playback.clone()),
@@ -210,27 +209,25 @@ impl App for Application {
                             sink.pause();
                         }
                     }
-                } else {
-                    if ui.button("Play").clicked() {
-                        let sink = Sink::try_new(&self.audio_playback.as_ref().unwrap().1).unwrap();
+                } else if ui.button("Play").clicked() {
+                    let sink = Sink::try_new(&self.audio_playback.as_ref().unwrap().1).unwrap();
 
-                        let samples = match self.settings.master_sample_playback_type {
-                            crate::PlaybackImplementation::Simd => {
-                                self.music_grid.create_preview_samples_simd()
-                            }
-                            crate::PlaybackImplementation::NonSimd => {
-                                self.music_grid.create_preview_samples()
-                            }
-                        };
+                    let samples = match self.settings.master_sample_playback_type {
+                        crate::PlaybackImplementation::Simd => {
+                            self.music_grid.create_preview_samples_simd()
+                        }
+                        crate::PlaybackImplementation::NonSimd => {
+                            self.music_grid.create_preview_samples()
+                        }
+                    };
 
-                        sink.append(SamplesBuffer::new(
-                            2,
-                            self.music_grid.sample_rate as u32,
-                            samples,
-                        ));
+                    sink.append(SamplesBuffer::new(
+                        2,
+                        self.music_grid.sample_rate as u32,
+                        samples,
+                    ));
 
-                        self.master_audio_sink = Some(sink);
-                    }
+                    self.master_audio_sink = Some(sink);
                 }
 
                 if ui.button("Stop").clicked() {
