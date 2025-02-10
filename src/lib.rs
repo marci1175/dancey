@@ -4,28 +4,23 @@
 pub mod app;
 
 use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2};
-use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink};
+use parking_lot::Mutex;
+use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
 use symphonia::core::{
     audio::{AudioBuffer, Signal},
-    codecs::{CodecParameters, DecoderOptions},
-    formats::FormatOptions,
+    codecs::{CodecParameters, Decoder, DecoderOptions},
+    formats::{FormatOptions, Packet},
     io::MediaSourceStream,
     meta::MetadataOptions,
     probe::Hint,
 };
 
 use std::{
-    collections::HashMap,
-    fs::{self, File},
-    hash::Hash,
-    io::{BufReader, Cursor},
-    path::PathBuf,
-    simd::f32x32,
-    sync::{
+    collections::HashMap, fs::{self, File}, hash::Hash, io::{BufReader, Cursor}, ops::{Deref, DerefMut}, path::PathBuf, simd::f32x32, sync::{
         atomic::AtomicU8,
         mpsc::{channel, Receiver, Sender},
         Arc,
-    },
+    }
 };
 
 use derive_more::derive::Debug;
@@ -38,15 +33,32 @@ pub struct SoundNode {
 
     #[serde(skip)]
     #[debug(skip)]
-    samples: Vec<f32>,
+    samples_buffer: SampleBuffer<f32>,
 
     position: i64,
 
     #[serde(skip)]
-    /// !!!
     track_params: CodecParameters,
 
     duration: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SamplePacket {
+    #[debug(skip)]
+    data: Box<[u8]>,
+    track_id: u32,
+    dur: u64,
+    ts: u64,
+}
+
+impl SamplePacket {
+    fn new(data: Box<[u8]>,
+    track_id: u32,
+    dur: u64,
+    ts: u64) -> Self {
+        Self { data, track_id, dur, ts }
+    }
 }
 
 impl SoundNode {
@@ -56,12 +68,44 @@ impl SoundNode {
         path: PathBuf,
         sample_rate: usize,
     ) -> anyhow::Result<Self> {
-        let (samples, duration, track_params) = parse_audio_file(path, sample_rate)?;
+        let (raw_data, duration, track_params, mut decoder) = parse_audio_file_to_buffer(path, sample_rate)?;
+
+        let sample_rate = track_params.sample_rate.unwrap();
+        
+        let samples_buffer_handle = SampleBuffer::new((sample_rate * 2) as usize, (sample_rate as f64 * duration) as usize);
+        let samples_buffer_handle_clone = samples_buffer_handle.clone();
+
+        let raw_data_clone = raw_data.clone();
+
+        std::thread::spawn(move || {
+            for sample_packet in raw_data_clone {
+                let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
+    
+                let decoded_packet = decoder.decode(&Packet::new_from_boxed_slice(sample_packet.track_id, sample_packet.ts, sample_packet.dur, sample_packet.data)).unwrap();
+    
+                let mut audio_buffer: AudioBuffer<f32> =
+                    AudioBuffer::new(decoded_packet.capacity() as u64, *decoded_packet.spec());
+                
+                decoded_packet.convert(&mut audio_buffer);
+                
+                let mut sample_buffer = vec![];
+                
+                let (left, right) = audio_buffer.chan_pair_mut(0, 1);
+                
+                for (idx, l_sample) in left.iter().enumerate() {
+                    sample_buffer.push(*l_sample);
+                    
+                    sample_buffer.push(right[idx]);
+                }
+    
+                chunk_buffer.extend(sample_buffer);
+            }
+        });
 
         Ok(Self {
             name,
-            samples,
             position,
+            samples_buffer: samples_buffer_handle,
             track_params,
             duration,
         })
@@ -78,18 +122,18 @@ impl SoundNode {
     pub fn clone_relocate(&self, new_nth_node: i64) -> Self {
         Self {
             name: self.name.clone(),
-            samples: self.samples.clone(),
             position: new_nth_node,
+            samples_buffer: self.samples_buffer.clone(),
             track_params: self.track_params.clone(),
             duration: self.duration,
         }
     }
 }
 
-fn parse_audio_file(
+fn parse_audio_file_to_buffer(
     path: PathBuf,
     sample_rate: usize,
-) -> anyhow::Result<(Vec<f32>, f64, CodecParameters)> {
+) -> anyhow::Result<(Vec<SamplePacket>, f64, CodecParameters, Box<dyn Decoder>)> {
     let bytes = Cursor::new(fs::read(path)?);
 
     let mss = MediaSourceStream::new(Box::new(bytes.clone()), Default::default());
@@ -113,8 +157,6 @@ fn parse_audio_file(
     .next()
     .ok_or_else(|| anyhow::Error::msg("No tracks were present in the input file."))?;
 
-    let original_sample_rate = track.codec_params.sample_rate.unwrap();
-
     let decoder_options = DecoderOptions::default();
 
     let track_params = track.codec_params.clone();
@@ -131,42 +173,17 @@ fn parse_audio_file(
         0.0
     };
 
-    let mut decoder = codec_registry.make(&track_params, &decoder_options)?;
+    let decoder = codec_registry.make(&track_params, &decoder_options)?;
 
-    let mut sample_buffer: Vec<f32> = Vec::new();
-
-    
-    while let Ok(packet) = &format.next_packet() {
-        let decoded_packet = decoder.decode(packet).unwrap();
-        
-        let mut audio_buffer: AudioBuffer<f32> =
-        AudioBuffer::new(decoded_packet.capacity() as u64, *decoded_packet.spec());
-        
-        decoded_packet.convert(&mut audio_buffer);
-        
-        let (left, right) = audio_buffer.chan_pair_mut(0, 1);
-        
-        for (idx, l_sample) in left.iter().enumerate() {
-            sample_buffer.push(*l_sample);
-            
-            sample_buffer.push(right[idx]);
-        }
-    }
-
-    let output_buffer = if sample_rate != original_sample_rate as usize {
-        let buffer: fon::Audio<fon::chan::Ch32, 2> = fon::Audio::with_f32_buffer(original_sample_rate, sample_buffer.clone());
-
-        let mut out_buffer: fon::Audio<fon::chan::Ch32, 2> = fon::Audio::with_audio(sample_rate as u32, &buffer);
-
-        out_buffer.as_f32_slice().to_vec()
-    }
-    else {
-        sample_buffer.clone()
-    };
-    
     let track_params = decoder.codec_params().clone();
 
-    Ok((output_buffer, duration, track_params))
+    let mut packet_list: Vec<SamplePacket> = Vec::new();
+
+    while let Ok(packet) = &format.next_packet() {
+        packet_list.push(SamplePacket::new(packet.data.clone(), packet.track_id(), packet.dur(), packet.ts()));
+    }
+
+    Ok((packet_list, duration, track_params, decoder))
 }
 
 /// An [`ItemGroup`] is a list type, which has an underlying [`HashMap`].
@@ -603,21 +620,21 @@ impl MusicGrid {
 
                                                 ui.separator();
 
-                                                if ui.button("Play").clicked() {
-                                                    if let Some((_, output_stream_handle)) =
-                                                        self.audio_playback.as_deref()
-                                                    {
-                                                        output_stream_handle
-                                                            .play_raw(SamplesBuffer::new(
-                                                                2,
-                                                                node.track_params
-                                                                    .sample_rate
-                                                                    .unwrap(),
-                                                                node.samples.clone(),
-                                                            ))
-                                                            .unwrap();
-                                                    }
-                                                }
+                                                // if ui.button("Play").clicked() {
+                                                //     if let Some((_, output_stream_handle)) =
+                                                //         self.audio_playback.as_deref()
+                                                //     {
+                                                //         output_stream_handle
+                                                //             .play_raw(SamplesBuffer::new(
+                                                //                 2,
+                                                //                 node.track_params
+                                                //                     .sample_rate
+                                                //                     .unwrap(),
+                                                //                 node.samples_buffer.get_inner().clone().inner_buffer,
+                                                //             ))
+                                                //             .unwrap();
+                                                //     }
+                                                // }
 
                                                 if ui.button("Delete").clicked() {
                                                     sound_nodes.swap_remove(idx);
@@ -758,28 +775,32 @@ impl MusicGrid {
 
         let samples_per_beat = ((self.sample_rate as u64 * 60) / self.beat_per_minute) * 2;
 
+        let last_node_sample_count = (last_node.duration * last_node.track_params.sample_rate.unwrap() as f64).ceil() as usize;
+        
         let total_samples = (last_node.position as f32 * samples_per_beat as f32).ceil() as usize
-            + last_node.samples.len();
+            + (last_node_sample_count);
 
         let mut buffer: Vec<f32> = vec![0.0; total_samples];
 
         for nodes in self.nodes.values() {
             for node in nodes {
+                let node_sample_count = (last_node.duration * last_node.track_params.sample_rate.unwrap() as f64) as usize;
+
                 let buffer_part_read = buffer[(node.position as u64 * samples_per_beat)
                     as usize
                     ..((node.position as u64 * samples_per_beat) as usize
-                        + node.samples.len())]
+                        + node_sample_count)]
                     .to_vec();
 
                 let buffer_part_write = &mut buffer[(node.position as u64 * samples_per_beat)
                     as usize
                     ..((node.position as u64 * samples_per_beat) as usize
-                        + node.samples.len())];
+                        + node_sample_count)];
 
                 let chunks = buffer_part_read.chunks_exact(32);
 
                 for (idx, (buffer_chunk, node_sample_chunk)) in
-                    chunks.zip(node.samples.chunks_exact(32)).enumerate()
+                    chunks.zip(node.samples_buffer.get_inner().chunks_exact(32)).enumerate()
                 {
                     let add_result = f32x32::load_or_default(buffer_chunk)
                         + f32x32::load_or_default(node_sample_chunk);
@@ -795,7 +816,6 @@ impl MusicGrid {
         buffer
     }
 
-    /// This implementa
     pub fn create_preview_samples(&self) -> Vec<f32> {
         let last_node = self.last_node.clone().unwrap();
 
@@ -803,28 +823,32 @@ impl MusicGrid {
 
         let samples_per_beat = (self.sample_rate as usize) as f32 / beat_dur;
 
+        let last_node_sample_count = (last_node.duration * last_node.track_params.sample_rate.unwrap() as f64) as usize;
+
         let total_samples = (last_node.position as f32 * samples_per_beat).ceil() as usize
-            + last_node.samples.len();
+            + last_node_sample_count;
 
         let mut buffer: Vec<f32> = vec![0.0; total_samples];
 
         for nodes in self.nodes.values() {
             for node in nodes {
+                let node_sample_count = (node.duration * last_node.track_params.sample_rate.unwrap() as f64) as usize;
+
                 let buffer_part_read = buffer[(node.position * samples_per_beat.ceil() as i64)
                     as usize
                     ..((node.position * samples_per_beat.ceil() as i64) as usize
-                        + node.samples.len())]
+                        + node_sample_count)]
                     .to_vec();
 
                 let buffer_part_write = &mut buffer[(node.position * samples_per_beat.ceil() as i64)
                     as usize
                     ..((node.position * samples_per_beat.ceil() as i64) as usize
-                        + node.samples.len())];
+                        + node_sample_count)];
 
                 let chunks = buffer_part_read.chunks_exact(32);
 
                 for (idx, (buffer_chunk, node_sample_chunk)) in
-                    chunks.zip(node.samples.chunks_exact(32)).enumerate()
+                    chunks.zip(node.samples_buffer.get_inner().chunks_exact(32)).enumerate()
                 {
                     let mut result_list: Vec<f32> = Vec::with_capacity(32);
 
@@ -862,7 +886,7 @@ pub fn playback_file(stream_handle: &OutputStreamHandle, path: PathBuf) -> anyho
 
 pub fn create_playbacker(
     stream_handle: &OutputStreamHandle,
-    source: Decoder<BufReader<File>>,
+    source: rodio::Decoder<BufReader<File>>,
 ) -> anyhow::Result<Sink> {
     let sink = rodio::Sink::try_new(stream_handle)?;
 
@@ -916,34 +940,83 @@ pub enum PlaybackImplementation {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LazyBuffer<T> {
+pub struct ChunkBuffer<T> {
     chunk_size: usize,
-
-    inner_counter: usize,
 
     inner_buffer: Vec<T>
 }
 
-impl<T> Default for LazyBuffer<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> LazyBuffer<T> {
-    pub fn new() -> Self {
-        Self { chunk_size: 256, inner_counter: 0, inner_buffer: Vec::new() }
+impl<T> ChunkBuffer<T> {
+    pub fn new(chunk_size: usize) -> Self {
+        Self { chunk_size, inner_buffer: Vec::new() }
     }
 
-    pub fn get_chunk(&self) -> &[T] {
-        &self.inner_buffer[self.inner_counter..self.inner_counter + self.chunk_size]
+    pub fn from_vec(chunk_size: usize, slice: Vec<T>) -> Self {
+        Self { chunk_size: chunk_size, inner_buffer: slice }
+    }
+
+    pub fn get_chunk(&mut self) -> Vec<T> {
+        self.inner_buffer.drain(0..self.chunk_size).collect::<Vec<T>>()
     }
     
     pub fn chunk_size_mut(&mut self) -> &mut usize {
         &mut self.chunk_size
     }
     
-    pub fn chunk_size(&self) -> usize {
+    pub fn get_chunk_size(&self) -> usize {
         self.chunk_size
+    }
+    
+    pub fn set_chunk_size(&mut self, chunk_size: usize) {
+        self.chunk_size = chunk_size;
+    }
+    
+    pub fn inner_buffer(&self) -> &[T] {
+        &self.inner_buffer
+    }
+
+    pub fn get_current_length(&self) -> usize {
+        self.inner_buffer.len()
+    }
+}
+
+impl<T> Deref for ChunkBuffer<T> {
+    type Target = Vec<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner_buffer
+    }
+}
+
+impl<T> DerefMut for ChunkBuffer<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner_buffer
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SampleBuffer<T> {
+    inner: Arc<Mutex<ChunkBuffer<T>>>,
+
+    desired_length: usize,
+}
+
+impl<T> Default for SampleBuffer<T> {
+    fn default() -> Self {
+        Self { inner: Arc::new(Mutex::new(ChunkBuffer::new(1))), desired_length: 0}
+    }
+}
+
+impl<T: Clone> SampleBuffer<T> {
+    pub fn new(chunk_size: usize, desired_length: usize) -> Self {
+        Self { inner: Arc::new(Mutex::new(ChunkBuffer::new(chunk_size))), desired_length}
+    }
+
+    pub fn from_slice(chunk_size: usize, slice: &[T]) -> Self {
+        Self { inner: Arc::new(Mutex::new(ChunkBuffer::from_vec(chunk_size, slice.to_vec()))), desired_length: slice.len()}
+    }
+
+    pub fn get_inner(&self) -> parking_lot::lock_api::MutexGuard<'_, parking_lot::RawMutex, ChunkBuffer<T>> {
+        self.inner.lock()
     }
 }
