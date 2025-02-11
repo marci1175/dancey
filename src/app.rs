@@ -69,9 +69,7 @@ pub struct Application {
 impl Default for Application {
     fn default() -> Self {
         let audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>> =
-            OutputStream::try_default()
-                .map(Arc::new)
-                .ok();
+            OutputStream::try_default().map(Arc::new).ok();
         Self {
             music_grid: MusicGrid::new(10, audio_playback.clone()),
             media_files: vec![],
@@ -194,40 +192,42 @@ impl App for Application {
                     self.music_grid.nodes.clear();
                 }
 
-                if let Some(sink) = &self.master_audio_sink {
-                    if ui
-                        .button(match sink.is_paused() {
-                            true => "Unpause",
-                            false => "Pause",
-                        })
-                        .clicked()
-                    {
-                        if sink.is_paused() {
-                            sink.play();
-                        } else {
-                            sink.pause();
+                ui.add_enabled_ui(self.music_grid.last_node.is_some(), |ui| {
+                    if let Some(sink) = &self.master_audio_sink {
+                        if ui
+                            .button(match sink.is_paused() {
+                                true => "Unpause",
+                                false => "Pause",
+                            })
+                            .clicked()
+                        {
+                            if sink.is_paused() {
+                                sink.play();
+                            } else {
+                                sink.pause();
+                            }
                         }
+                    } else if ui.button("Play").clicked() {
+                        let sink = Sink::try_new(&self.audio_playback.as_ref().unwrap().1).unwrap();
+    
+                        let samples = match self.settings.master_sample_playback_type {
+                            crate::PlaybackImplementation::Simd => {
+                                self.music_grid.create_preview_samples_simd()
+                            }
+                            crate::PlaybackImplementation::NonSimd => {
+                                self.music_grid.create_preview_samples()
+                            }
+                        };
+    
+                        sink.append(SamplesBuffer::new(
+                            2,
+                            self.music_grid.sample_rate as u32,
+                            samples,
+                        ));
+    
+                        self.master_audio_sink = Some(sink);
                     }
-                } else if ui.button("Play").clicked() {
-                    let sink = Sink::try_new(&self.audio_playback.as_ref().unwrap().1).unwrap();
-
-                    let samples = match self.settings.master_sample_playback_type {
-                        crate::PlaybackImplementation::Simd => {
-                            self.music_grid.create_preview_samples_simd()
-                        }
-                        crate::PlaybackImplementation::NonSimd => {
-                            self.music_grid.create_preview_samples()
-                        }
-                    };
-
-                    sink.append(SamplesBuffer::new(
-                        2,
-                        self.music_grid.sample_rate as u32,
-                        samples,
-                    ));
-
-                    self.master_audio_sink = Some(sink);
-                }
+                });
 
                 if ui.button("Stop").clicked() {
                     self.master_audio_sink = None;
