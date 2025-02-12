@@ -45,6 +45,8 @@ pub struct SoundNode {
     #[debug(skip)]
     samples_buffer: SampleBuffer<f32>,
 
+    #[serde(skip)]
+    #[debug(skip)]
     raw_data: Vec<SamplePacket>,
 
     #[serde(skip)]
@@ -86,10 +88,17 @@ impl SoundNode {
 
         let raw_data_clone = raw_data.clone();
 
-        std::thread::spawn(move || {
-            for sample_packet in raw_data_clone {
-                let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
+        let resample_ratio = sample_rate as f64 / track_sample_rate as f64;
 
+        let mut resampler: rubato::FastFixedOut<f32> = rubato::FastFixedOut::new(resample_ratio, resample_ratio * 5., rubato::PolynomialDegree::Cubic, 1024, 2).unwrap();
+
+        std::thread::spawn(move || {
+            let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
+            
+            let mut left_buffer = vec![];
+            let mut right_buffer = vec![];
+
+            for sample_packet in raw_data_clone {
                 let decoded_packet = decoder
                     .decode(&Packet::new_from_boxed_slice(
                         sample_packet.track_id,
@@ -99,44 +108,38 @@ impl SoundNode {
                     ))
                     .unwrap();
 
+                
                 let mut audio_buffer: AudioBuffer<f32> =
                     AudioBuffer::new(decoded_packet.capacity() as u64, *decoded_packet.spec());
-
-                decoded_packet.convert(&mut audio_buffer);
-
-                let mut sample_buffer = vec![];
-
-                let (left, right) = audio_buffer.chan_pair_mut(0, 1);
-
-                for (idx, l_sample) in left.iter().enumerate() {
-                    sample_buffer.push(*l_sample);
-
-                    sample_buffer.push(right[idx]);
-                }
-
-                let resample_ratio = sample_rate as f64 / track_sample_rate as f64;
-                let resampler: rubato::FastFixedOut<f32> = rubato::FastFixedOut::new(resample_ratio, resample_ratio * 5., rubato::PolynomialDegree::Cubic, 1024, 2).unwrap();
-
-                let delay = resampler.output_delay();
-                let new_sample_length = sample_buffer.len() as f64 * resample_ratio;
- 
-                let mut resampled_samples: Vec<f32> = vec![];
-
                 
-
-                let output_buffer = if track_sample_rate as usize != sample_rate {
-                    
-                    let buffer: fon::Audio<fon::chan::Ch32, 2> = fon::Audio::with_f32_buffer(track_sample_rate, sample_buffer.clone());
-            
-                    let mut out_buffer: fon::Audio<fon::chan::Ch32, 2> = fon::Audio::with_audio(sample_rate as u32, &buffer);
-            
-                    out_buffer.as_f32_slice().to_vec()
+                decoded_packet.convert(&mut audio_buffer);
+                
+                let (left, right) = audio_buffer.chan_pair_mut(0, 1);
+                
+                left_buffer.extend(left.to_vec());
+                right_buffer.extend(right.to_vec());
+                
+                if left_buffer.len() < resampler.input_frames_next() {
+                    continue;
                 }
-                else {
-                    sample_buffer.clone()
-                };
 
-                chunk_buffer.extend(output_buffer);
+                let buffer = resampler.process(&vec![left_buffer.drain(0..resampler.input_frames_next()).collect::<Vec<f32>>(), right_buffer.drain(0..resampler.input_frames_next()).collect::<Vec<f32>>()], None).unwrap();
+                
+                for channels in buffer.windows(2) {
+                    for i in 0..channels[0].len() {
+                        chunk_buffer.push(channels[0][i]);
+                        chunk_buffer.push(channels[1][i]);
+                    }
+                }
+            }
+
+            let partial_buffer = resampler.process_partial(Some(&vec![left_buffer, right_buffer]), None).unwrap();
+                
+            for channels in partial_buffer.windows(2) {
+                for i in 0..channels[0].len() {
+                    chunk_buffer.push(channels[0][i]);
+                    chunk_buffer.push(channels[1][i]);
+                }
             }
         });
 
@@ -376,7 +379,6 @@ pub struct MusicGrid {
     /// If this is `None` an error will be raised.
     audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>>,
 
-    #[serde(skip)]
     last_node: Option<(usize, SoundNode)>,
 
     sample_rate: SampleRate,
