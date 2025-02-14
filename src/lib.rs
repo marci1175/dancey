@@ -802,9 +802,7 @@ impl MusicGrid {
     /// This implementation uses SIMD (Single instruction, multiple data) instructions to further speed up the process.
     /// These SIMD intructions may cause compatiblity issues, the user can choose whether to use a Non-SIMD implementation.
     /// Do not and Im saying do NOT touch the code calculating the sample count, etc...
-    pub fn create_preview_samples_simd(
-        &self,
-    ) -> Vec<f32> {
+    pub fn create_preview_samples_simd(&self) -> Vec<f32> {
         let (position, last_node) = self.last_node.clone().unwrap();
 
         let samples_per_beat = ((self.sample_rate as usize * 60) / self.beat_per_minute) * 2;
@@ -876,8 +874,7 @@ impl MusicGrid {
 
                 let node_samples = node.samples_buffer.get_inner();
 
-                let node_sample_count =
-                    node_samples.len();
+                let node_sample_count = node_samples.len();
 
                 // If the end of the sample / musicnode is smaller than the starting sample idx, skip this node
                 if (sound_beat_position + node_sample_count) < starting_sample_idx {
@@ -885,7 +882,11 @@ impl MusicGrid {
                 }
 
                 // The range the Node has in the buffer.
-                let node_buffer_range = sound_beat_position.checked_sub(starting_sample_idx).unwrap_or(0)..((sound_beat_position + node_sample_count) - starting_sample_idx).clamp(0, total_samples);
+                let node_buffer_range = sound_beat_position
+                    .checked_sub(starting_sample_idx)
+                    .unwrap_or(0)
+                    ..((sound_beat_position + node_sample_count) - starting_sample_idx)
+                        .clamp(0, total_samples);
 
                 // The buffer slice for reading
                 let buffer_part_read = buffer[node_buffer_range.clone()].to_vec();
@@ -894,10 +895,11 @@ impl MusicGrid {
                 let buffer_part_write = &mut buffer[node_buffer_range];
 
                 let chunks = buffer_part_read.chunks_exact(32);
-                
+
                 // This the range the node's samples have in the buffer.
-                let node_sample_range = starting_sample_idx..destination_sample_idx.max(node_samples.len() - 1);
-                
+                let node_sample_range =
+                    starting_sample_idx..destination_sample_idx.max(node_samples.len() - 1);
+
                 for (idx, (buffer_chunk, node_sample_chunk)) in chunks
                     .zip(node_samples[node_sample_range].chunks_exact(32))
                     .enumerate()
