@@ -213,7 +213,7 @@ impl App for Application {
                         let samples = match self.settings.master_sample_playback_type {
                             crate::PlaybackImplementation::Simd => {
                                 // self.music_grid.create_preview_samples_simd(0, 0)
-                                self.music_grid.preview_samples_simd(0, 1000000)
+                                self.music_grid.buffer_preview_samples_simd(0, 3000000)
                             }
                             crate::PlaybackImplementation::NonSimd => {
                                 self.music_grid.create_preview_samples()

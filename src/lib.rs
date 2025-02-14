@@ -856,7 +856,7 @@ impl MusicGrid {
     /// This implementation uses SIMD (Single instruction, multiple data) instructions to further speed up the process.
     /// These SIMD intructions may cause compatiblity issues, the user can choose whether to use a Non-SIMD implementation.
     /// Do not and Im saying do NOT touch the code calculating the sample count, etc...
-    pub fn preview_samples_simd(
+    pub fn buffer_preview_samples_simd(
         &self,
         starting_sample_idx: usize,
         destination_sample_idx: usize,
