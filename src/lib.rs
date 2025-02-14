@@ -81,20 +81,28 @@ impl SoundNode {
         let track_sample_rate = track_params.sample_rate.unwrap();
 
         let samples_buffer_handle = SampleBuffer::new(
-            (track_sample_rate * 2) as usize,
-            (track_sample_rate as f64 * duration) as usize,
+            (sample_rate * 2) as usize,
+            (sample_rate as f64 * duration) as usize,
         );
+
         let samples_buffer_handle_clone = samples_buffer_handle.clone();
 
         let raw_data_clone = raw_data.clone();
 
         let resample_ratio = sample_rate as f64 / track_sample_rate as f64;
 
-        let mut resampler: rubato::FastFixedOut<f32> = rubato::FastFixedOut::new(resample_ratio, resample_ratio * 5., rubato::PolynomialDegree::Cubic, 1024, 2).unwrap();
+        let mut resampler: rubato::FastFixedOut<f32> = rubato::FastFixedOut::new(
+            resample_ratio,
+            resample_ratio * 5.,
+            rubato::PolynomialDegree::Cubic,
+            1024,
+            2,
+        )
+        .unwrap();
 
         std::thread::spawn(move || {
             let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
-            
+
             let mut left_buffer = vec![];
             let mut right_buffer = vec![];
 
@@ -108,23 +116,34 @@ impl SoundNode {
                     ))
                     .unwrap();
 
-                
                 let mut audio_buffer: AudioBuffer<f32> =
                     AudioBuffer::new(decoded_packet.capacity() as u64, *decoded_packet.spec());
-                
+
                 decoded_packet.convert(&mut audio_buffer);
-                
+
                 let (left, right) = audio_buffer.chan_pair_mut(0, 1);
-                
+
                 left_buffer.extend(left.to_vec());
                 right_buffer.extend(right.to_vec());
-                
+
                 if left_buffer.len() < resampler.input_frames_next() {
                     continue;
                 }
 
-                let buffer = resampler.process(&vec![left_buffer.drain(0..resampler.input_frames_next()).collect::<Vec<f32>>(), right_buffer.drain(0..resampler.input_frames_next()).collect::<Vec<f32>>()], None).unwrap();
-                
+                let buffer = resampler
+                    .process(
+                        &vec![
+                            left_buffer
+                                .drain(0..resampler.input_frames_next())
+                                .collect::<Vec<f32>>(),
+                            right_buffer
+                                .drain(0..resampler.input_frames_next())
+                                .collect::<Vec<f32>>(),
+                        ],
+                        None,
+                    )
+                    .unwrap();
+
                 for channels in buffer.windows(2) {
                     for i in 0..channels[0].len() {
                         chunk_buffer.push(channels[0][i]);
@@ -133,8 +152,10 @@ impl SoundNode {
                 }
             }
 
-            let partial_buffer = resampler.process_partial(Some(&vec![left_buffer, right_buffer]), None).unwrap();
-                
+            let partial_buffer = resampler
+                .process_partial(Some(&vec![left_buffer, right_buffer]), None)
+                .unwrap();
+
             for channels in partial_buffer.windows(2) {
                 for i in 0..channels[0].len() {
                     chunk_buffer.push(channels[0][i]);
@@ -513,7 +534,8 @@ impl MusicGrid {
                             self.nodes.insert(idx + 1, *position, node.clone());
 
                             // The return type is vec because of rust not cuz it returns all of the track which end last.
-                            self.last_node = Self::calculate_last_node(&self.nodes, self.beat_per_minute);
+                            self.last_node =
+                                Self::calculate_last_node(&self.nodes, self.beat_per_minute);
                         }
                     }
                 }
@@ -532,7 +554,9 @@ impl MusicGrid {
                                 for (idx, (position, node)) in
                                     sound_nodes.clone().iter().enumerate()
                                 {
-                                    let scaled_width = node.duration as f32 * width_per_sec;
+                                    let scaled_width = node.duration as f32
+                                        * width_per_sec
+                                        * (100. / self.beat_per_minute as f32);
 
                                     let nth_node_pos =
                                         rect.left() + (*position as f32 * grid_node_width);
@@ -660,9 +684,10 @@ impl MusicGrid {
                                 }
                             }
                         }
-                    
+
                         if was_table_modified {
-                            self.last_node = Self::calculate_last_node(&self.nodes, self.beat_per_minute);
+                            self.last_node =
+                                Self::calculate_last_node(&self.nodes, self.beat_per_minute);
                         }
                     });
 
@@ -679,15 +704,18 @@ impl MusicGrid {
         self.last_node = Self::calculate_last_node(&self.nodes, self.beat_per_minute);
     }
 
-    pub fn calculate_last_node(nodes: &ItemGroup<usize, usize, SoundNode>, beat_per_minute: usize) -> Option<(usize, SoundNode)> {
+    pub fn calculate_last_node(
+        nodes: &ItemGroup<usize, usize, SoundNode>,
+        beat_per_minute: usize,
+    ) -> Option<(usize, SoundNode)> {
         // Update the `last_node` field.
         if let Some(last_nodes) = nodes.values().max_by_key(|nodes| {
             nodes
                 .iter()
                 .filter_map(|(position, node)| {
                     Some(
-                        (*position as f64 * (60.0 / beat_per_minute as f64)
-                            + node.duration.ceil()) as u64,
+                        (*position as f64 * (60.0 / beat_per_minute as f64) + node.duration.ceil())
+                            as u64,
                     )
                 })
                 .max()
@@ -700,7 +728,7 @@ impl MusicGrid {
 
         None
     }
-    
+
     /// Mutably gets the beat_per_minute field of [`MusicGrid`].
     /// If this value is modified the grid will automaticly adjust. (This includes adjusting the [`SoundNode`]-s too.)
     pub fn beat_per_minute_mut(&mut self) -> &mut usize {
@@ -774,7 +802,9 @@ impl MusicGrid {
     /// This implementation uses SIMD (Single instruction, multiple data) instructions to further speed up the process.
     /// These SIMD intructions may cause compatiblity issues, the user can choose whether to use a Non-SIMD implementation.
     /// Do not and Im saying do NOT touch the code calculating the sample count, etc...
-    pub fn create_preview_samples_simd(&self) -> Vec<f32> {
+    pub fn create_preview_samples_simd(
+        &self,
+    ) -> Vec<f32> {
         let (position, last_node) = self.last_node.clone().unwrap();
 
         let samples_per_beat = ((self.sample_rate as usize * 60) / self.beat_per_minute) * 2;
@@ -783,6 +813,7 @@ impl MusicGrid {
             * last_node.track_params.sample_rate.unwrap() as f64)
             .ceil() as usize;
 
+        // This is the count of samples the final output will contain.
         let total_samples =
             (position as f32 * samples_per_beat as f32).ceil() as usize + (last_node_sample_count);
 
@@ -790,21 +821,85 @@ impl MusicGrid {
 
         for nodes in self.nodes.values() {
             for (position, node) in nodes {
-                let node_sample_count = (last_node.duration
-                    * last_node.track_params.sample_rate.unwrap() as f64)
-                    as usize;
+                let node_sample_count =
+                    (node.duration * node.track_params.sample_rate.unwrap() as f64) as usize;
 
-                let buffer_part_read = buffer[(*position * samples_per_beat) as usize
-                    ..((*position * samples_per_beat) as usize + node_sample_count)]
-                    .to_vec();
+                let sound_beat_position = (*position * samples_per_beat) as usize;
 
-                let buffer_part_write = &mut buffer[(*position * samples_per_beat) as usize
-                    ..((*position * samples_per_beat) as usize + node_sample_count)];
+                let buffer_part_read =
+                    buffer[sound_beat_position..(sound_beat_position + node_sample_count)].to_vec();
+
+                let buffer_part_write =
+                    &mut buffer[sound_beat_position..(sound_beat_position + node_sample_count)];
 
                 let chunks = buffer_part_read.chunks_exact(32);
 
                 for (idx, (buffer_chunk, node_sample_chunk)) in chunks
                     .zip(node.samples_buffer.get_inner().chunks_exact(32))
+                    .enumerate()
+                {
+                    let add_result = f32x32::load_or_default(buffer_chunk)
+                        + f32x32::load_or_default(node_sample_chunk);
+
+                    let safe_slice =
+                        safe_mut_slice(buffer_part_write, idx * 32..((idx + 1) * 32) - 1);
+
+                    safe_slice.copy_from_slice(&add_result.to_array()[0..buffer_chunk.len() - 1]);
+                }
+            }
+        }
+
+        buffer
+    }
+
+    /// Adds together all the samples from the [`MusicGrid`] with correct placement.
+    /// This implementation uses SIMD (Single instruction, multiple data) instructions to further speed up the process.
+    /// These SIMD intructions may cause compatiblity issues, the user can choose whether to use a Non-SIMD implementation.
+    /// Do not and Im saying do NOT touch the code calculating the sample count, etc...
+    pub fn preview_samples_simd(
+        &self,
+        starting_sample_idx: usize,
+        destination_sample_idx: usize,
+    ) -> Vec<f32> {
+        let samples_per_beat = ((self.sample_rate as usize * 60) / self.beat_per_minute) * 2;
+
+        // This is the count of samples the final output will contain.
+        let total_samples = destination_sample_idx - starting_sample_idx;
+
+        let mut buffer: Vec<f32> = vec![0.0; total_samples];
+
+        // Iter over all the channels.
+        for channels in self.nodes.values() {
+            // Iter over all the nodes in the channels.
+            for (position, node) in channels {
+                let sound_beat_position = (*position * samples_per_beat) as usize;
+
+                let node_samples = node.samples_buffer.get_inner();
+
+                let node_sample_count =
+                    node_samples.len();
+
+                // If the end of the sample / musicnode is smaller than the starting sample idx, skip this node
+                if (sound_beat_position + node_sample_count) < starting_sample_idx {
+                    continue;
+                }
+
+                // The range the Node has in the buffer.
+                let node_buffer_range = sound_beat_position.checked_sub(starting_sample_idx).unwrap_or(0)..((sound_beat_position + node_sample_count) - starting_sample_idx).clamp(0, total_samples);
+
+                // The buffer slice for reading
+                let buffer_part_read = buffer[node_buffer_range.clone()].to_vec();
+
+                // The buffer slice for writing
+                let buffer_part_write = &mut buffer[node_buffer_range];
+
+                let chunks = buffer_part_read.chunks_exact(32);
+                
+                // This the range the node's samples have in the buffer.
+                let node_sample_range = starting_sample_idx..destination_sample_idx.max(node_samples.len() - 1);
+                
+                for (idx, (buffer_chunk, node_sample_chunk)) in chunks
+                    .zip(node_samples[node_sample_range].chunks_exact(32))
                     .enumerate()
                 {
                     let add_result = f32x32::load_or_default(buffer_chunk)

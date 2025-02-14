@@ -209,22 +209,23 @@ impl App for Application {
                         }
                     } else if ui.button("Play").clicked() {
                         let sink = Sink::try_new(&self.audio_playback.as_ref().unwrap().1).unwrap();
-    
+
                         let samples = match self.settings.master_sample_playback_type {
                             crate::PlaybackImplementation::Simd => {
-                                self.music_grid.create_preview_samples_simd()
+                                // self.music_grid.create_preview_samples_simd(0, 0)
+                                self.music_grid.preview_samples_simd(0, 1000000)
                             }
                             crate::PlaybackImplementation::NonSimd => {
                                 self.music_grid.create_preview_samples()
                             }
                         };
-    
+
                         sink.append(SamplesBuffer::new(
                             2,
                             self.music_grid.sample_rate as u32,
                             samples,
                         ));
-    
+
                         self.master_audio_sink = Some(sink);
                     }
                 });
@@ -383,7 +384,8 @@ impl App for Application {
             self.music_grid.show(ui);
 
             if let Some(sink) = &self.master_audio_sink {
-                let beat_dur = 60. / self.music_grid.beat_per_minute as f32;
+                let beat_dur = 60. / self.music_grid.beat_per_minute as f32
+                    * (self.music_grid.beat_per_minute as f32 / 100.);
 
                 let secs_elapsed = sink.get_pos().as_secs_f32();
 
