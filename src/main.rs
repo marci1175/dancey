@@ -1,7 +1,8 @@
 use dancey::app::Application;
 use eframe::NativeOptions;
 
-fn main() -> Result<(), eframe::Error> {
+#[tokio::main]
+async fn main() -> Result<(), eframe::Error> {
     let native_options = NativeOptions {
         ..Default::default()
     };

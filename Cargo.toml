@@ -20,6 +20,7 @@ rubato = "0.16.1"
 criterion = "0.5.1"
 fon = "0.6.0"
 indexmap = {version = "2.7.1", features = ["serde"]}
+tokio = { version = "1.43.0", features = ["full"] }
 
 [[bench]]
 name = "benchmark"

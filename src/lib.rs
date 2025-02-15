@@ -152,7 +152,7 @@ impl SoundNode {
                             }
                         }
 
-                        continue;
+                        return;
                     }
 
                     // We do not have to worry about leftover samples, or handling the samples' end as the line above will protect us from any kind of error.
@@ -184,13 +184,6 @@ impl SoundNode {
                         // Extend both left and right buffers with the decoded samples channels.
                         left_buffer.extend(left.to_vec());
                         right_buffer.extend(right.to_vec());
-
-                        // If the buffer isnt big enough to be decoded continue decoding packets.
-                        if left_buffer.len() < resampler.input_frames_next()
-                            || right_buffer.len() < resampler.input_frames_next()
-                        {
-                            continue;
-                        }
 
                         // Decode all of the packets we can right now
                         while let Some(_) =
@@ -1060,23 +1053,19 @@ impl MusicGrid {
                     dbg!(err.to_string());
                 };
 
-                let sound_beat_position = (*position * samples_per_beat) as usize;
+                let node_position = (*position * samples_per_beat) as usize;
 
                 let node_samples = node.samples_buffer.get_inner();
 
                 let node_sample_count = node_samples.len();
 
                 // If the end of the sample / musicnode is smaller than the starting sample idx, skip this node
-                if (sound_beat_position + node_sample_count) < starting_sample_idx {
+                if (node_position + node_sample_count) < starting_sample_idx {
                     continue;
                 }
 
                 // The range the Node has in the buffer.
-                let node_buffer_range = sound_beat_position
-                    .checked_sub(starting_sample_idx)
-                    .unwrap_or(0)
-                    ..((sound_beat_position + node_sample_count) - starting_sample_idx)
-                        .clamp(0, total_samples);
+                let node_buffer_range = node_position.clamp(0, total_samples)..(node_position + node_sample_count).clamp(0, total_samples);
 
                 // The buffer slice for reading
                 let buffer_part_read = buffer[node_buffer_range.clone()].to_vec();
@@ -1086,12 +1075,19 @@ impl MusicGrid {
 
                 let chunks = buffer_part_read.chunks_exact(32);
 
-                // This the range the node's samples have in the buffer.
+                // This the range the buffer has in the node's samples.
                 let node_sample_range =
-                    starting_sample_idx..destination_sample_idx.clamp(0, node_samples.len());
+                    starting_sample_idx.clamp(0, node_samples.len())..destination_sample_idx.clamp(0, node_samples.len());
+
+                let node_sample_chunks = node_samples[node_sample_range].chunks_exact(32);
+                
+                let chunks_remainder = chunks.remainder();
+                let node_sample_remainder = node_sample_chunks.remainder();
+
+                let mut last_idx = 0;
 
                 for (idx, (buffer_chunk, node_sample_chunk)) in chunks
-                    .zip(node_samples[node_sample_range].chunks_exact(32))
+                    .zip(node_sample_chunks)
                     .enumerate()
                 {
                     let add_result = f32x32::load_or_default(buffer_chunk)
@@ -1101,6 +1097,21 @@ impl MusicGrid {
                         safe_mut_slice(buffer_part_write, idx * 32..((idx + 1) * 32) - 1);
 
                     safe_slice.copy_from_slice(&add_result.to_array()[0..buffer_chunk.len() - 1]);
+
+                    last_idx = idx;
+                }
+                
+                // Parse the remainder samples
+                if !chunks_remainder.is_empty() || !node_sample_remainder.is_empty() {
+                    let add_result = f32x32::load_or_default(chunks_remainder)
+                    + f32x32::load_or_default(node_sample_remainder);
+
+                    let remainder_slice_idx = buffer_part_write.len() - last_idx * 32;
+
+                    let safe_slice =
+                        safe_mut_slice(buffer_part_write, remainder_slice_idx..buffer_part_write.len());
+
+                    safe_slice.copy_from_slice(&add_result.to_array()[0..chunks_remainder.len().checked_sub(1).unwrap_or(0)]);
                 }
             }
         }

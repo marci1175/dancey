@@ -9,6 +9,7 @@ use egui_toast::{Toast, Toasts};
 use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
 
 use derive_more::derive::Debug;
+use tokio::{select, sync::mpsc::{channel, Sender}};
 
 use std::{path::PathBuf, sync::{atomic::AtomicUsize, Arc}, time::Duration, usize};
 
@@ -52,6 +53,10 @@ pub struct Application {
     #[serde(skip)]
     audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>>,
 
+    #[debug(skip)]
+    #[serde(skip)]
+    playback_thread_sender: Option<Sender<Option<usize>>>,
+
     #[serde(skip)]
     playback_idx: Arc<AtomicUsize>,
 
@@ -83,6 +88,7 @@ impl Default for Application {
             toasts: Toasts::new(),
             dragged_media: None,
             settings: Settings::default(),
+            playback_thread_sender: None,
         }
     }
 }
@@ -104,10 +110,6 @@ impl App for Application {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui_extras::install_image_loaders(ctx);
-
-        if let Some(sink) = &self.master_audio_sink {
-            
-        }
 
         egui::TopBottomPanel::top("setts").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -218,23 +220,50 @@ impl App for Application {
                     } else if ui.button("Play").clicked() {
                         let sink = Arc::new(Sink::try_new(&self.audio_playback.as_ref().unwrap().1).unwrap());
                         
+                        self.playback_idx.store(0, std::sync::atomic::Ordering::Relaxed);
                         let playback_idx = self.playback_idx.clone();
                         let sample_rate = self.music_grid.sample_rate as usize;
                         let nodes = self.music_grid.nodes.clone();
                         let beat_per_minute = self.music_grid.beat_per_minute;
                         let sink_clone = sink.clone();
 
-                        std::thread::spawn(move || {
-                            loop {
-                                let samples = MusicGrid::buffer_preview_samples_simd(playback_idx.fetch_add(sample_rate * 3 * 2, std::sync::atomic::Ordering::Relaxed), playback_idx.load(std::sync::atomic::Ordering::Relaxed), sample_rate, beat_per_minute, &nodes);
-                                
-                                sink_clone.append(SamplesBuffer::new(
-                                    2,
-                                    sample_rate as u32,
-                                    samples,
-                                ));
+                        let (sender, mut receiver) = channel::<Option<usize>>(200);
 
-                                std::thread::sleep(Duration::from_secs(3));
+                        self.playback_thread_sender = Some(sender);
+
+                        // Dont change this unless youve chnaged the value in buffer_preview_samples_simd
+                        let sample_length_secs = 3;
+
+                        tokio::spawn(async move {
+                            let samples = MusicGrid::buffer_preview_samples_simd(playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed), playback_idx.load(std::sync::atomic::Ordering::Relaxed), sample_rate, beat_per_minute, &nodes);
+                    
+                            sink_clone.append(SamplesBuffer::new(
+                                2,
+                                sample_rate as u32,
+                                samples,
+                            ));
+
+                            loop {
+                                select! {
+                                    _ = tokio::time::sleep(Duration::from_secs(sample_length_secs as u64)) => {
+                                        let samples = MusicGrid::buffer_preview_samples_simd(playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed), playback_idx.load(std::sync::atomic::Ordering::Relaxed), sample_rate, beat_per_minute, &nodes);
+                    
+                                        sink_clone.append(SamplesBuffer::new(
+                                            2,
+                                            sample_rate as u32,
+                                            samples,
+                                        ));
+                                    },
+
+                                    Some(seek) = receiver.recv() => {
+                                        if let Some(seek_pos) = seek {
+                                            playback_idx.store(seek_pos, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        else {
+                                            return;
+                                        }
+                                    }
+                                }
                             }
                         });
 
@@ -242,9 +271,19 @@ impl App for Application {
                     }
                 });
 
-                if ui.button("Stop").clicked() {
-                    self.master_audio_sink = None;
-                }
+                ui.add_enabled_ui(self.master_audio_sink.is_some(), |ui| {
+                    if ui.button("Stop").clicked() {
+                        if let Some(sender) = &self.playback_thread_sender {
+                            if let Err(err) = sender.try_send(None) {
+                                dbg!(err.to_string());
+                            }
+
+                            self.master_audio_sink.as_ref().unwrap().clear();
+
+                            self.master_audio_sink = None;
+                        }
+                    }
+                });
 
                 if let Some(sink) = &self.master_audio_sink {
                     sink.set_volume(
@@ -254,11 +293,6 @@ impl App for Application {
                             as f32
                             / 100.,
                     );
-
-                    // If the sink is empty reset the player
-                    if sink.empty() {
-                        self.master_audio_sink = None;
-                    }
                 }
             });
         });
