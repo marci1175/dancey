@@ -4,10 +4,9 @@
 pub mod app;
 
 use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2};
-use fon::pos;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
-use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
+use rodio::{OutputStream, OutputStreamHandle, Sink};
 use rubato::Resampler;
 use symphonia::core::{
     audio::{AudioBuffer, Signal},
@@ -19,25 +18,19 @@ use symphonia::core::{
 };
 
 use std::{
-    collections::HashMap,
-    fs::{self, File},
-    hash::Hash,
-    io::{BufReader, Cursor},
-    ops::{Deref, DerefMut},
-    path::PathBuf,
-    simd::f32x32,
-    sync::{
+    collections::HashMap, fs::{self, File}, hash::Hash, io::{BufReader, Cursor}, ops::{Deref, DerefMut}, path::PathBuf, simd::f32x32, sync::{
         atomic::AtomicU8,
         mpsc::{channel, Receiver, Sender},
         Arc,
-    },
+    }
 };
 
 use derive_more::derive::Debug;
 use egui::{scroll_area::ScrollAreaOutput, Rect, Response, Sense, Stroke, Ui, UiBuilder};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct SoundNode {
     name: String,
 
@@ -50,9 +43,217 @@ pub struct SoundNode {
     raw_data: Vec<SamplePacket>,
 
     #[serde(skip)]
+    #[debug(skip)]
+    resampling_request_channel: Sender<usize>,
+
+    #[serde(skip)]
     track_params: CodecParameters,
 
     duration: f64,
+}
+
+impl Default for SoundNode {
+    fn default() -> Self {
+        let (sender, _) = channel();
+        Self {
+            name: String::default(),
+            samples_buffer: SampleBuffer::default(),
+            raw_data: vec![],
+            resampling_request_channel: sender,
+            track_params: CodecParameters::new(),
+            duration: 0.,
+        }
+    }
+}
+
+impl SoundNode {
+    pub fn new(name: String, path: PathBuf, sample_rate: usize) -> anyhow::Result<Self> {
+        let (raw_data, duration, track_params, mut decoder) = parse_audio_file_to_buffer(path)?;
+
+        let track_sample_rate = track_params.sample_rate.unwrap();
+
+        let samples_buffer_handle = SampleBuffer::new(
+            (sample_rate * 2) as usize,
+            (sample_rate as f64 * duration) as usize,
+        );
+
+        let samples_buffer_handle_clone = samples_buffer_handle.clone();
+
+        let mut raw_data_clone = raw_data.clone();
+
+        let resample_ratio = sample_rate as f64 / track_sample_rate as f64;
+
+        let mut resampler: rubato::FastFixedOut<f32> = rubato::FastFixedOut::new(
+            resample_ratio,
+            resample_ratio * 5.,
+            rubato::PolynomialDegree::Cubic,
+            1024,
+            2,
+        )
+        .unwrap();
+
+        let (sender, receiver) = channel();
+
+        std::thread::spawn(move || {
+            // Constanly wait for an incoming sample parsing message.
+            loop {
+                if let Ok(desired_decoded_sample_length) = receiver.recv() {
+                    // Allocate both left and right channel buffers.
+                    let mut left_buffer = vec![];
+                    let mut right_buffer = vec![];
+
+                    // Create a handle to the master buffer.
+                    let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
+
+                    // Get the first packet, to get the sample count.
+                    let first_packet = raw_data_clone.first().unwrap();
+
+                    // First we decode the very first packet, to get information about one packet
+                    let decoded_packet_sample_count = decoder
+                        .decode(&Packet::new_from_boxed_slice(
+                            first_packet.track_id,
+                            first_packet.ts,
+                            first_packet.dur,
+                            first_packet.data.clone(),
+                        ))
+                        .unwrap()
+                        .capacity();
+
+                    // We decode the first packet "manually" and add it to the left and right buffer. This will get ingested with the next packet.
+                    let last_decoded = decoder.last_decoded();
+
+                    // Create an audio buffer, a place for the samples.
+                    let mut audio_buffer: AudioBuffer<f32> =
+                        AudioBuffer::new(last_decoded.capacity() as u64, *last_decoded.spec());
+
+                    // Convert the packet to the desired AudioBuffer
+                    last_decoded.convert(&mut audio_buffer);
+
+                    // Get the stereo channels of the decoded packet.
+                    let (left, right) = audio_buffer.chan_pair_mut(0, 1);
+
+                    // Extend both left and right buffers with the decoded samples channels.
+                    left_buffer.extend(left.to_vec());
+                    right_buffer.extend(right.to_vec());
+
+                    // If there are less packets than desired in the raw_data this means we have come to the last of the raw samples.
+                    if raw_data_clone.len()
+                        < (desired_decoded_sample_length / decoded_packet_sample_count)
+                    {
+                        let partial_buffer = resampler
+                            .process_partial(Some(&vec![left_buffer, right_buffer]), None)
+                            .unwrap();
+
+                        for channels in partial_buffer.windows(2) {
+                            for i in 0..channels[0].len() {
+                                chunk_buffer.push(channels[0][i]);
+                                chunk_buffer.push(channels[1][i]);
+                            }
+                        }
+
+                        return;
+                    }
+
+                    // We do not have to worry about leftover samples, or handling the samples' end as the line above will protect us from any kind of error.
+                    for sample_packet in raw_data_clone
+                        .drain(0..(desired_decoded_sample_length / decoded_packet_sample_count))
+                    {
+                        let decoded_packet = decoder
+                            .decode(&Packet::new_from_boxed_slice(
+                                sample_packet.track_id,
+                                sample_packet.ts,
+                                sample_packet.dur,
+                                sample_packet.data,
+                            ))
+                            .unwrap();
+                        // I might be able to move this outside the loop
+                        // Create an audio buffer, a place for the samples.
+                        let mut audio_buffer: AudioBuffer<f32> = AudioBuffer::new(
+                            decoded_packet.capacity() as u64,
+                            *decoded_packet.spec(),
+                        );
+
+                        // Convert the packet to the desired AudioBuffer
+                        decoded_packet.convert(&mut audio_buffer);
+
+                        // Get the stereo channels of the decoded packet.
+                        let (left, right) = audio_buffer.chan_pair_mut(0, 1);
+
+                        // Extend both left and right buffers with the decoded samples channels.
+                        left_buffer.extend(left.to_vec());
+                        right_buffer.extend(right.to_vec());
+
+                        // If the buffer isnt big enough to be decoded continue decoding packets.
+                        if left_buffer.len() < resampler.input_frames_next()
+                            || right_buffer.len() < resampler.input_frames_next()
+                        {
+                            continue;
+                        }
+
+                        // Decode all of the packets we can right now
+                        while let Some(_) =
+                            left_buffer.clone().get(0..resampler.input_frames_next())
+                        {
+                            // Create a buffer from the left and right buffers
+                            let buffer = resampler
+                                .process(
+                                    &vec![
+                                        left_buffer
+                                            .drain(0..resampler.input_frames_next())
+                                            .collect::<Vec<f32>>(),
+                                        right_buffer
+                                            .drain(0..resampler.input_frames_next())
+                                            .collect::<Vec<f32>>(),
+                                    ],
+                                    None,
+                                )
+                                .unwrap();
+
+                            // Add the samples to the master buffer
+                            for channels in buffer.windows(2) {
+                                for i in 0..channels[0].len() {
+                                    chunk_buffer.push(channels[0][i]);
+                                    chunk_buffer.push(channels[1][i]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            name,
+            raw_data,
+            resampling_request_channel: sender,
+            samples_buffer: samples_buffer_handle,
+            track_params,
+            duration,
+        })
+    }
+
+    pub fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// This function sends a request in the inner channel with the size of `sample_rate * 3`. This is going to make it so that it will parse 3 seconds of the samples.
+    pub fn request_default_count_sample_parsing(
+        &self,
+    ) -> Result<(), std::sync::mpsc::SendError<usize>> {
+        self.resampling_request_channel
+            .send(self.track_params.sample_rate.unwrap() as usize * 3)
+    }
+
+    pub fn request_custom_count_sample_parsing(
+        &self,
+        count: usize,
+    ) -> Result<(), std::sync::mpsc::SendError<usize>> {
+        self.resampling_request_channel.send(count)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -71,114 +272,6 @@ impl SamplePacket {
             dur,
             ts,
         }
-    }
-}
-
-impl SoundNode {
-    pub fn new(name: String, path: PathBuf, sample_rate: usize) -> anyhow::Result<Self> {
-        let (raw_data, duration, track_params, mut decoder) = parse_audio_file_to_buffer(path)?;
-
-        let track_sample_rate = track_params.sample_rate.unwrap();
-
-        let samples_buffer_handle = SampleBuffer::new(
-            (sample_rate * 2) as usize,
-            (sample_rate as f64 * duration) as usize,
-        );
-
-        let samples_buffer_handle_clone = samples_buffer_handle.clone();
-
-        let raw_data_clone = raw_data.clone();
-
-        let resample_ratio = sample_rate as f64 / track_sample_rate as f64;
-
-        let mut resampler: rubato::FastFixedOut<f32> = rubato::FastFixedOut::new(
-            resample_ratio,
-            resample_ratio * 5.,
-            rubato::PolynomialDegree::Cubic,
-            1024,
-            2,
-        )
-        .unwrap();
-
-        std::thread::spawn(move || {
-            let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
-
-            let mut left_buffer = vec![];
-            let mut right_buffer = vec![];
-
-            for sample_packet in raw_data_clone {
-                let decoded_packet = decoder
-                    .decode(&Packet::new_from_boxed_slice(
-                        sample_packet.track_id,
-                        sample_packet.ts,
-                        sample_packet.dur,
-                        sample_packet.data,
-                    ))
-                    .unwrap();
-
-                let mut audio_buffer: AudioBuffer<f32> =
-                    AudioBuffer::new(decoded_packet.capacity() as u64, *decoded_packet.spec());
-
-                decoded_packet.convert(&mut audio_buffer);
-
-                let (left, right) = audio_buffer.chan_pair_mut(0, 1);
-
-                left_buffer.extend(left.to_vec());
-                right_buffer.extend(right.to_vec());
-
-                if left_buffer.len() < resampler.input_frames_next() {
-                    continue;
-                }
-
-                let buffer = resampler
-                    .process(
-                        &vec![
-                            left_buffer
-                                .drain(0..resampler.input_frames_next())
-                                .collect::<Vec<f32>>(),
-                            right_buffer
-                                .drain(0..resampler.input_frames_next())
-                                .collect::<Vec<f32>>(),
-                        ],
-                        None,
-                    )
-                    .unwrap();
-
-                for channels in buffer.windows(2) {
-                    for i in 0..channels[0].len() {
-                        chunk_buffer.push(channels[0][i]);
-                        chunk_buffer.push(channels[1][i]);
-                    }
-                }
-            }
-
-            let partial_buffer = resampler
-                .process_partial(Some(&vec![left_buffer, right_buffer]), None)
-                .unwrap();
-
-            for channels in partial_buffer.windows(2) {
-                for i in 0..channels[0].len() {
-                    chunk_buffer.push(channels[0][i]);
-                    chunk_buffer.push(channels[1][i]);
-                }
-            }
-        });
-
-        Ok(Self {
-            name,
-            raw_data,
-            samples_buffer: samples_buffer_handle,
-            track_params,
-            duration,
-        })
-    }
-
-    pub fn name_mut(&mut self) -> &mut String {
-        &mut self.name
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
     }
 }
 
@@ -783,6 +876,9 @@ impl MusicGrid {
             // Create a new node
             let node = SoundNode::new(file_name, path, self.sample_rate as usize)?;
 
+            // Request the first 3 seconds to be parsed
+            node.request_default_count_sample_parsing().unwrap();
+
             // We should first send the node, and only then increment the inner counter.
             self.dnd_sender.send((
                 ((pointer_pos.x - self.grid_rect.left() + x_pos_offset)
@@ -855,11 +951,13 @@ impl MusicGrid {
     /// These SIMD intructions may cause compatiblity issues, the user can choose whether to use a Non-SIMD implementation.
     /// Do not and Im saying do NOT touch the code calculating the sample count, etc...
     pub fn buffer_preview_samples_simd(
-        &self,
         starting_sample_idx: usize,
         destination_sample_idx: usize,
+        sample_rate: usize,
+        beat_per_minute: usize,
+        nodes: &ItemGroup<usize, usize, SoundNode>
     ) -> Vec<f32> {
-        let samples_per_beat = ((self.sample_rate as usize * 60) / self.beat_per_minute) * 2;
+        let samples_per_beat = ((sample_rate as usize * 60) / beat_per_minute) * 2;
 
         // This is the count of samples the final output will contain.
         let total_samples = destination_sample_idx - starting_sample_idx;
@@ -867,9 +965,13 @@ impl MusicGrid {
         let mut buffer: Vec<f32> = vec![0.0; total_samples];
 
         // Iter over all the channels.
-        for channels in self.nodes.values() {
+        for channels in nodes.values() {
             // Iter over all the nodes in the channels.
             for (position, node) in channels {
+                if let Err(err) = node.request_default_count_sample_parsing() {
+                    dbg!(err);
+                };
+
                 let sound_beat_position = (*position * samples_per_beat) as usize;
 
                 let node_samples = node.samples_buffer.get_inner();
@@ -898,7 +1000,7 @@ impl MusicGrid {
 
                 // This the range the node's samples have in the buffer.
                 let node_sample_range =
-                    starting_sample_idx..destination_sample_idx.max(node_samples.len() - 1);
+                    starting_sample_idx..destination_sample_idx.clamp(0, node_samples.len() - 1);
 
                 for (idx, (buffer_chunk, node_sample_chunk)) in chunks
                     .zip(node_samples[node_sample_range].chunks_exact(32))
@@ -1009,7 +1111,6 @@ pub fn get_source_from_path(
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     master_audio_percent: Arc<AtomicU8>,
-    sample_rate: SampleRate,
     master_sample_playback_type: PlaybackImplementation,
 }
 
@@ -1017,7 +1118,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             master_audio_percent: Arc::new(AtomicU8::new(100)),
-            sample_rate: SampleRate::Medium,
             master_sample_playback_type: PlaybackImplementation::Simd,
         }
     }

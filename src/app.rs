@@ -10,7 +10,7 @@ use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
 
 use derive_more::derive::Debug;
 
-use std::{path::PathBuf, sync::Arc, usize};
+use std::{path::PathBuf, sync::{atomic::AtomicUsize, Arc}, time::Duration, usize};
 
 use crate::{playback_file, MusicGrid, Settings};
 
@@ -52,9 +52,12 @@ pub struct Application {
     #[serde(skip)]
     audio_playback: Option<Arc<(OutputStream, OutputStreamHandle)>>,
 
+    #[serde(skip)]
+    playback_idx: Arc<AtomicUsize>,
+
     #[debug(skip)]
     #[serde(skip)]
-    master_audio_sink: Option<Sink>,
+    master_audio_sink: Option<Arc<Sink>>,
 
     #[serde(skip)]
     dragged_media: Option<MediaFile>,
@@ -72,6 +75,7 @@ impl Default for Application {
             OutputStream::try_default().map(Arc::new).ok();
         Self {
             music_grid: MusicGrid::new(10, audio_playback.clone()),
+            playback_idx: Arc::new(AtomicUsize::new(0)),
             media_files: vec![],
             media_panel_is_open: false,
             master_audio_sink: None,
@@ -100,6 +104,10 @@ impl App for Application {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui_extras::install_image_loaders(ctx);
+
+        if let Some(sink) = &self.master_audio_sink {
+            
+        }
 
         egui::TopBottomPanel::top("setts").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -208,23 +216,25 @@ impl App for Application {
                             }
                         }
                     } else if ui.button("Play").clicked() {
-                        let sink = Sink::try_new(&self.audio_playback.as_ref().unwrap().1).unwrap();
+                        let sink = Arc::new(Sink::try_new(&self.audio_playback.as_ref().unwrap().1).unwrap());
+                        
+                        let playback_idx = self.playback_idx.clone();
+                        let sample_rate = self.music_grid.sample_rate as usize;
+                        let nodes = self.music_grid.nodes.clone();
+                        let beat_per_minute = self.music_grid.beat_per_minute;
+                        let sink_clone = sink.clone();
 
-                        let samples = match self.settings.master_sample_playback_type {
-                            crate::PlaybackImplementation::Simd => {
-                                // self.music_grid.create_preview_samples_simd(0, 0)
-                                self.music_grid.buffer_preview_samples_simd(0, 3000000)
+                        std::thread::spawn(move || {
+                            loop {
+                                let samples = MusicGrid::buffer_preview_samples_simd(dbg!(playback_idx.fetch_add(sample_rate * 3, std::sync::atomic::Ordering::Relaxed)), dbg!(playback_idx.load(std::sync::atomic::Ordering::Relaxed)), sample_rate, beat_per_minute, &nodes);
+                                
+                                sink_clone.append(SamplesBuffer::new(
+                                    2,
+                                    sample_rate as u32,
+                                    samples,
+                                ));
                             }
-                            crate::PlaybackImplementation::NonSimd => {
-                                self.music_grid.create_preview_samples()
-                            }
-                        };
-
-                        sink.append(SamplesBuffer::new(
-                            2,
-                            self.music_grid.sample_rate as u32,
-                            samples,
-                        ));
+                        });
 
                         self.master_audio_sink = Some(sink);
                     }
