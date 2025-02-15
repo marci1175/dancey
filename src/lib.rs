@@ -14,15 +14,23 @@ use symphonia::core::{
     formats::{FormatOptions, Packet},
     io::MediaSourceStream,
     meta::MetadataOptions,
-    probe::Hint, sample::SampleFormat,
+    probe::Hint,
+    sample::SampleFormat,
 };
 
 use std::{
-    collections::HashMap, fs::{self, File}, hash::Hash, io::{BufReader, Cursor}, ops::{Deref, DerefMut}, path::PathBuf, simd::f32x32, sync::{
+    collections::HashMap,
+    fs::{self, File},
+    hash::Hash,
+    io::{BufReader, Cursor},
+    ops::{Deref, DerefMut},
+    path::PathBuf,
+    simd::f32x32,
+    sync::{
         atomic::AtomicU8,
         mpsc::{channel, Receiver, Sender},
         Arc,
-    }
+    },
 };
 
 use derive_more::derive::Debug;
@@ -222,7 +230,20 @@ impl SoundNode {
             raw_data,
             resampling_request_channel: sender,
             samples_buffer: samples_buffer_handle,
-            track_params: NodeCodecParameters::new(track_params.sample_rate, track_params.n_frames, track_params.start_ts, track_params.sample_format, track_params.bits_per_sample, track_params.bits_per_coded_sample, track_params.delay, track_params.padding, track_params.max_frames_per_packet, track_params.packet_data_integrity, track_params.frames_per_block, track_params.extra_data),
+            track_params: NodeCodecParameters::new(
+                track_params.sample_rate,
+                track_params.n_frames,
+                track_params.start_ts,
+                track_params.sample_format,
+                track_params.bits_per_sample,
+                track_params.bits_per_coded_sample,
+                track_params.delay,
+                track_params.padding,
+                track_params.max_frames_per_packet,
+                track_params.packet_data_integrity,
+                track_params.frames_per_block,
+                track_params.extra_data,
+            ),
             duration,
         })
     }
@@ -314,8 +335,36 @@ pub struct NodeCodecParameters {
 }
 
 impl NodeCodecParameters {
-    pub fn new(sample_rate: Option<u32>, n_frames: Option<u64>, start_ts: u64, sample_format: Option<SampleFormat>, bits_per_sample: Option<u32>, bits_per_coded_sample: Option<u32>, delay: Option<u32>, padding: Option<u32>, max_frames_per_packet: Option<u64>, packet_data_integrity: bool, frames_per_block: Option<u64>, extra_data: Option<Box<[u8]>>) -> Self {
-        Self { sample_rate, n_frames, start_ts, sample_format: Some(NodeSampleFormat::from_sample_format(sample_format.unwrap_or(SampleFormat::F32))), bits_per_sample, bits_per_coded_sample, delay, padding, max_frames_per_packet, packet_data_integrity, frames_per_block, extra_data }
+    pub fn new(
+        sample_rate: Option<u32>,
+        n_frames: Option<u64>,
+        start_ts: u64,
+        sample_format: Option<SampleFormat>,
+        bits_per_sample: Option<u32>,
+        bits_per_coded_sample: Option<u32>,
+        delay: Option<u32>,
+        padding: Option<u32>,
+        max_frames_per_packet: Option<u64>,
+        packet_data_integrity: bool,
+        frames_per_block: Option<u64>,
+        extra_data: Option<Box<[u8]>>,
+    ) -> Self {
+        Self {
+            sample_rate,
+            n_frames,
+            start_ts,
+            sample_format: Some(NodeSampleFormat::from_sample_format(
+                sample_format.unwrap_or(SampleFormat::F32),
+            )),
+            bits_per_sample,
+            bits_per_coded_sample,
+            delay,
+            padding,
+            max_frames_per_packet,
+            packet_data_integrity,
+            frames_per_block,
+            extra_data,
+        }
     }
 }
 
@@ -1036,10 +1085,9 @@ impl MusicGrid {
         destination_sample_idx: usize,
         sample_rate: usize,
         beat_per_minute: usize,
-        nodes: &ItemGroup<usize, usize, SoundNode>
+        grid_node_width: f32,
+        nodes: &ItemGroup<usize, usize, SoundNode>,
     ) -> Vec<f32> {
-        let samples_per_beat = ((sample_rate as usize * 60) / beat_per_minute) * 2;
-
         // This is the count of samples the final output will contain.
         let total_samples = destination_sample_idx - starting_sample_idx;
 
@@ -1054,19 +1102,26 @@ impl MusicGrid {
                     dbg!(err.to_string());
                 };
 
-                let node_position = (*position * samples_per_beat) as usize;
+                let node_position = (*position as f32 * (sample_rate as f32 * 60.0 / beat_per_minute as f32)) as usize;
 
                 let node_samples = node.samples_buffer.get_inner();
 
                 let node_sample_count = node_samples.len();
 
                 // If the end of the sample / musicnode is smaller than the starting sample idx, skip this node
-                if (node_position + node_sample_count) < starting_sample_idx {
+                if (node_position + node_sample_count) < starting_sample_idx || destination_sample_idx < node_position {
                     continue;
                 }
 
                 // The range the Node has in the buffer.
-                let node_buffer_range = node_position.clamp(0, total_samples)..(node_position + node_sample_count).clamp(0, total_samples);
+                let node_buffer_range = {
+                    if node_position < starting_sample_idx {
+                        0..(node_sample_count).clamp(0, total_samples)
+                    }
+                    else {
+                        ((node_position as f32 * 1.5) as usize).clamp(0, total_samples)..(node_position + node_sample_count).clamp(0, total_samples)
+                    }
+                };
 
                 // The buffer slice for reading
                 let buffer_part_read = buffer[node_buffer_range.clone()].to_vec();
@@ -1077,19 +1132,18 @@ impl MusicGrid {
                 let chunks = buffer_part_read.chunks_exact(32);
 
                 // This the range the buffer has in the node's samples.
-                let node_sample_range =
-                    starting_sample_idx.clamp(0, node_samples.len())..destination_sample_idx.clamp(0, node_samples.len());
+                let node_sample_range = starting_sample_idx.clamp(0, node_samples.len())
+                    ..destination_sample_idx.clamp(0, node_samples.len());
 
                 let node_sample_chunks = node_samples[node_sample_range].chunks_exact(32);
-                
+
                 let chunks_remainder = chunks.remainder();
                 let node_sample_remainder = node_sample_chunks.remainder();
 
                 let mut last_idx = 0;
 
-                for (idx, (buffer_chunk, node_sample_chunk)) in chunks
-                    .zip(node_sample_chunks)
-                    .enumerate()
+                for (idx, (buffer_chunk, node_sample_chunk)) in
+                    chunks.zip(node_sample_chunks).enumerate()
                 {
                     let add_result = f32x32::load_or_default(buffer_chunk)
                         + f32x32::load_or_default(node_sample_chunk);
@@ -1101,18 +1155,23 @@ impl MusicGrid {
 
                     last_idx = idx;
                 }
-                
+
                 // Parse the remainder samples
                 if !chunks_remainder.is_empty() || !node_sample_remainder.is_empty() {
                     let add_result = f32x32::load_or_default(chunks_remainder)
-                    + f32x32::load_or_default(node_sample_remainder);
+                        + f32x32::load_or_default(node_sample_remainder);
 
                     let remainder_slice_idx = buffer_part_write.len() - last_idx * 32;
 
-                    let safe_slice =
-                        safe_mut_slice(buffer_part_write, remainder_slice_idx..buffer_part_write.len());
+                    let safe_slice = safe_mut_slice(
+                        buffer_part_write,
+                        remainder_slice_idx..buffer_part_write.len(),
+                    );
 
-                    safe_slice.copy_from_slice(&add_result.to_array()[0..chunks_remainder.len().checked_sub(1).unwrap_or(0)]);
+                    safe_slice.copy_from_slice(
+                        &add_result.to_array()
+                            [0..chunks_remainder.len().checked_sub(1).unwrap_or(0)],
+                    );
                 }
             }
         }
@@ -1342,4 +1401,13 @@ impl<T: Clone> SampleBuffer<T> {
     ) -> parking_lot::lock_api::MutexGuard<'_, parking_lot::RawMutex, ChunkBuffer<T>> {
         self.inner.lock()
     }
+}
+
+pub enum PlaybackControl {
+    /// Pause / Unpause the stream.
+    Pause,
+    /// Shutdown the stream.
+    Stop,
+    /// Seek in the samples.
+    Seek(usize)
 }

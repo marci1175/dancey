@@ -9,11 +9,19 @@ use egui_toast::{Toast, Toasts};
 use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
 
 use derive_more::derive::Debug;
-use tokio::{select, sync::mpsc::{channel, Sender}};
+use tokio::{
+    select,
+    sync::mpsc::{channel, Sender},
+};
 
-use std::{path::PathBuf, sync::{atomic::AtomicUsize, Arc}, time::Duration, usize};
+use std::{
+    path::PathBuf,
+    sync::{atomic::AtomicUsize, Arc},
+    time::Duration,
+    usize,
+};
 
-use crate::{playback_file, MusicGrid, Settings};
+use crate::{playback_file, MusicGrid, PlaybackControl, Settings};
 
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaFile {
@@ -55,7 +63,7 @@ pub struct Application {
 
     #[debug(skip)]
     #[serde(skip)]
-    playback_thread_sender: Option<Sender<Option<usize>>>,
+    playback_thread_sender: Option<Sender<PlaybackControl>>,
 
     #[serde(skip)]
     playback_idx: Arc<AtomicUsize>,
@@ -202,6 +210,8 @@ impl App for Application {
                     self.music_grid.nodes.clear();
                 }
 
+                let samples_per_beat = (self.music_grid.sample_rate as usize as f32 * 60.0) / self.music_grid.beat_per_minute as f32;
+                
                 ui.add_enabled_ui(self.music_grid.last_node.is_some(), |ui| {
                     if let Some(sink) = &self.master_audio_sink {
                         if ui
@@ -211,6 +221,12 @@ impl App for Application {
                             })
                             .clicked()
                         {
+                            if let Some(sender) = &self.playback_thread_sender {
+                                if let Err(err) = sender.try_send(PlaybackControl::Pause) {
+                                    dbg!(err.to_string());
+                                }
+                            }
+
                             if sink.is_paused() {
                                 sink.play();
                             } else {
@@ -227,15 +243,19 @@ impl App for Application {
                         let beat_per_minute = self.music_grid.beat_per_minute;
                         let sink_clone = sink.clone();
 
-                        let (sender, mut receiver) = channel::<Option<usize>>(200);
+                        let (sender, mut receiver) = channel::<PlaybackControl>(200);
 
                         self.playback_thread_sender = Some(sender);
 
                         // Dont change this unless youve chnaged the value in buffer_preview_samples_simd
                         let sample_length_secs = 3;
+                        let width_per_node = self.music_grid.get_grid_node_width();
 
                         tokio::spawn(async move {
-                            let samples = MusicGrid::buffer_preview_samples_simd(playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed), playback_idx.load(std::sync::atomic::Ordering::Relaxed), sample_rate, beat_per_minute, &nodes);
+                            let starting_idx = playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed);
+                            let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
+
+                            let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, beat_per_minute as usize, width_per_node, &nodes);
                     
                             sink_clone.append(SamplesBuffer::new(
                                 2,
@@ -243,24 +263,36 @@ impl App for Application {
                                 samples,
                             ));
 
+                            let mut should_playback = true;
+
                             loop {
                                 select! {
                                     _ = tokio::time::sleep(Duration::from_secs(sample_length_secs as u64)) => {
-                                        let samples = MusicGrid::buffer_preview_samples_simd(playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed), playback_idx.load(std::sync::atomic::Ordering::Relaxed), sample_rate, beat_per_minute, &nodes);
-                    
-                                        sink_clone.append(SamplesBuffer::new(
-                                            2,
-                                            sample_rate as u32,
-                                            samples,
-                                        ));
+                                        if should_playback {
+                                            let starting_idx = playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed);
+                                            let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
+
+                                            let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, beat_per_minute as usize, width_per_node, &nodes);
+                        
+                                            sink_clone.append(SamplesBuffer::new(
+                                                2,
+                                                sample_rate as u32,
+                                                samples,
+                                            ));
+                                        }
                                     },
 
-                                    Some(seek) = receiver.recv() => {
-                                        if let Some(seek_pos) = seek {
-                                            playback_idx.store(seek_pos, std::sync::atomic::Ordering::Relaxed);
-                                        }
-                                        else {
-                                            return;
+                                    Some(seek_control) = receiver.recv() => {
+                                        match seek_control {
+                                            PlaybackControl::Pause => {
+                                                should_playback = !should_playback;
+                                            },
+                                            PlaybackControl::Stop => {
+                                                return;
+                                            },
+                                            PlaybackControl::Seek(seek_pos) => {
+                                                playback_idx.store(seek_pos, std::sync::atomic::Ordering::Relaxed);
+                                            },
                                         }
                                     }
                                 }
@@ -274,7 +306,7 @@ impl App for Application {
                 ui.add_enabled_ui(self.master_audio_sink.is_some(), |ui| {
                     if ui.button("Stop").clicked() {
                         if let Some(sender) = &self.playback_thread_sender {
-                            if let Err(err) = sender.try_send(None) {
+                            if let Err(err) = sender.try_send(PlaybackControl::Stop) {
                                 dbg!(err.to_string());
                             }
 
@@ -436,7 +468,7 @@ impl App for Application {
                 let secs_elapsed = sink.get_pos().as_secs_f32();
 
                 let x = self.music_grid.grid_rect.left()
-                    + (secs_elapsed / beat_dur) * self.music_grid.get_grid_node_width();
+                    + (secs_elapsed as f32 / beat_dur) * self.music_grid.get_grid_node_width();
 
                 let delta_pos = if let Some(state) = &self.music_grid.inner_state {
                     state.state.offset
