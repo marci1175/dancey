@@ -226,13 +226,15 @@ impl App for Application {
 
                         std::thread::spawn(move || {
                             loop {
-                                let samples = MusicGrid::buffer_preview_samples_simd(dbg!(playback_idx.fetch_add(sample_rate * 3, std::sync::atomic::Ordering::Relaxed)), dbg!(playback_idx.load(std::sync::atomic::Ordering::Relaxed)), sample_rate, beat_per_minute, &nodes);
+                                let samples = MusicGrid::buffer_preview_samples_simd(playback_idx.fetch_add(sample_rate * 3 * 2, std::sync::atomic::Ordering::Relaxed), playback_idx.load(std::sync::atomic::Ordering::Relaxed), sample_rate, beat_per_minute, &nodes);
                                 
                                 sink_clone.append(SamplesBuffer::new(
                                     2,
                                     sample_rate as u32,
                                     samples,
                                 ));
+
+                                std::thread::sleep(Duration::from_secs(3));
                             }
                         });
 

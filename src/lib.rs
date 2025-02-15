@@ -14,7 +14,7 @@ use symphonia::core::{
     formats::{FormatOptions, Packet},
     io::MediaSourceStream,
     meta::MetadataOptions,
-    probe::Hint,
+    probe::Hint, sample::SampleFormat,
 };
 
 use std::{
@@ -46,8 +46,7 @@ pub struct SoundNode {
     #[debug(skip)]
     resampling_request_channel: Sender<usize>,
 
-    #[serde(skip)]
-    track_params: CodecParameters,
+    track_params: NodeCodecParameters,
 
     duration: f64,
 }
@@ -60,7 +59,7 @@ impl Default for SoundNode {
             samples_buffer: SampleBuffer::default(),
             raw_data: vec![],
             resampling_request_channel: sender,
-            track_params: CodecParameters::new(),
+            track_params: NodeCodecParameters::default(),
             duration: 0.,
         }
     }
@@ -79,7 +78,7 @@ impl SoundNode {
 
         let samples_buffer_handle_clone = samples_buffer_handle.clone();
 
-        let mut raw_data_clone = raw_data.clone();
+        let mut packet_list = raw_data.clone();
 
         let resample_ratio = sample_rate as f64 / track_sample_rate as f64;
 
@@ -92,8 +91,10 @@ impl SoundNode {
         )
         .unwrap();
 
+        // Create communication channels
         let (sender, receiver) = channel();
 
+        // Create sample parsing thread
         std::thread::spawn(move || {
             // Constanly wait for an incoming sample parsing message.
             loop {
@@ -106,7 +107,7 @@ impl SoundNode {
                     let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
 
                     // Get the first packet, to get the sample count.
-                    let first_packet = raw_data_clone.first().unwrap();
+                    let first_packet = packet_list.first().unwrap();
 
                     // First we decode the very first packet, to get information about one packet
                     let decoded_packet_sample_count = decoder
@@ -137,7 +138,7 @@ impl SoundNode {
                     right_buffer.extend(right.to_vec());
 
                     // If there are less packets than desired in the raw_data this means we have come to the last of the raw samples.
-                    if raw_data_clone.len()
+                    if packet_list.len()
                         < (desired_decoded_sample_length / decoded_packet_sample_count)
                     {
                         let partial_buffer = resampler
@@ -151,11 +152,11 @@ impl SoundNode {
                             }
                         }
 
-                        return;
+                        continue;
                     }
 
                     // We do not have to worry about leftover samples, or handling the samples' end as the line above will protect us from any kind of error.
-                    for sample_packet in raw_data_clone
+                    for sample_packet in packet_list
                         .drain(0..(desired_decoded_sample_length / decoded_packet_sample_count))
                     {
                         let decoded_packet = decoder
@@ -166,6 +167,7 @@ impl SoundNode {
                                 sample_packet.data,
                             ))
                             .unwrap();
+
                         // I might be able to move this outside the loop
                         // Create an audio buffer, a place for the samples.
                         let mut audio_buffer: AudioBuffer<f32> = AudioBuffer::new(
@@ -227,12 +229,12 @@ impl SoundNode {
             raw_data,
             resampling_request_channel: sender,
             samples_buffer: samples_buffer_handle,
-            track_params,
+            track_params: NodeCodecParameters::new(track_params.sample_rate, track_params.n_frames, track_params.start_ts, track_params.sample_format, track_params.bits_per_sample, track_params.bits_per_coded_sample, track_params.delay, track_params.padding, track_params.max_frames_per_packet, track_params.packet_data_integrity, track_params.frames_per_block, track_params.extra_data),
             duration,
         })
     }
 
-    pub fn name_mut(&mut self) -> &mut String {
+    pub fn name_mut(&mut self) -> &mut str {
         &mut self.name
     }
 
@@ -240,12 +242,12 @@ impl SoundNode {
         &self.name
     }
 
-    /// This function sends a request in the inner channel with the size of `sample_rate * 3`. This is going to make it so that it will parse 3 seconds of the samples.
+    /// This function sends a request in the inner channel with the size of `sample_rate * 3 * 2`. This is going to make it so that it will parse 3 seconds of stereo samples.
     pub fn request_default_count_sample_parsing(
         &self,
     ) -> Result<(), std::sync::mpsc::SendError<usize>> {
         self.resampling_request_channel
-            .send(self.track_params.sample_rate.unwrap() as usize * 3)
+            .send(self.track_params.sample_rate.unwrap() as usize * 3 * 2)
     }
 
     pub fn request_custom_count_sample_parsing(
@@ -271,6 +273,96 @@ impl SamplePacket {
             track_id,
             dur,
             ts,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct NodeCodecParameters {
+    /// The sample rate of the audio in Hz.
+    pub sample_rate: Option<u32>,
+
+    /// The length of the stream in number of frames.
+    /// If a timebase is available, this field can be used to calculate the total duration of the
+    /// stream in seconds by using [`TimeBase::calc_time`] and passing the number of frames as the
+    /// timestamp.
+    pub n_frames: Option<u64>,
+
+    /// The timestamp of the first frame.
+    pub start_ts: u64,
+
+    /// The sample format of an audio sample.
+    pub sample_format: Option<NodeSampleFormat>,
+
+    /// The number of bits per one decoded audio sample.
+    pub bits_per_sample: Option<u32>,
+
+    /// The number of bits per one encoded audio sample.
+    pub bits_per_coded_sample: Option<u32>,
+
+    /// The number of leading frames inserted by the encoder that should be skipped during playback.
+    pub delay: Option<u32>,
+
+    /// The number of trailing frames inserted by the encoder for padding that should be skipped
+    /// during playback.
+    pub padding: Option<u32>,
+
+    /// The maximum number of frames a packet will contain.
+    pub max_frames_per_packet: Option<u64>,
+
+    /// The demuxer guarantees packet data integrity.
+    pub packet_data_integrity: bool,
+
+    /// The number of frames per block, in case packets are seperated in multiple blocks.
+    pub frames_per_block: Option<u64>,
+
+    /// Extra data (defined by the codec).
+    pub extra_data: Option<Box<[u8]>>,
+}
+
+impl NodeCodecParameters {
+    pub fn new(sample_rate: Option<u32>, n_frames: Option<u64>, start_ts: u64, sample_format: Option<SampleFormat>, bits_per_sample: Option<u32>, bits_per_coded_sample: Option<u32>, delay: Option<u32>, padding: Option<u32>, max_frames_per_packet: Option<u64>, packet_data_integrity: bool, frames_per_block: Option<u64>, extra_data: Option<Box<[u8]>>) -> Self {
+        Self { sample_rate, n_frames, start_ts, sample_format: Some(NodeSampleFormat::from_sample_format(sample_format.unwrap_or(SampleFormat::F32))), bits_per_sample, bits_per_coded_sample, delay, padding, max_frames_per_packet, packet_data_integrity, frames_per_block, extra_data }
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum NodeSampleFormat {
+    /// Unsigned 8-bit integer.
+    U8,
+    /// Unsigned 16-bit integer.
+    U16,
+    /// Unsigned 24-bit integer.
+    U24,
+    /// Unsigned 32-bit integer.
+    U32,
+    /// Signed 8-bit integer.
+    S8,
+    /// Signed 16-bit integer.
+    S16,
+    /// Signed 24-bit integer.
+    S24,
+    /// Signed 32-bit integer.
+    S32,
+    /// Single precision (32-bit) floating point.
+    F32,
+    /// Double precision (64-bit) floating point.
+    F64,
+}
+
+impl NodeSampleFormat {
+    pub fn from_sample_format(sample_format: SampleFormat) -> Self {
+        match sample_format {
+            SampleFormat::U8 => Self::U8,
+            SampleFormat::U16 => Self::U16,
+            SampleFormat::U24 => Self::U24,
+            SampleFormat::U32 => Self::U32,
+            SampleFormat::S8 => Self::S8,
+            SampleFormat::S16 => Self::S16,
+            SampleFormat::S24 => Self::S24,
+            SampleFormat::S32 => Self::S32,
+            SampleFormat::F32 => Self::F32,
+            SampleFormat::F64 => Self::F64,
         }
     }
 }
@@ -946,10 +1038,6 @@ impl MusicGrid {
         buffer
     }
 
-    /// Adds together all the samples from the [`MusicGrid`] with correct placement.
-    /// This implementation uses SIMD (Single instruction, multiple data) instructions to further speed up the process.
-    /// These SIMD intructions may cause compatiblity issues, the user can choose whether to use a Non-SIMD implementation.
-    /// Do not and Im saying do NOT touch the code calculating the sample count, etc...
     pub fn buffer_preview_samples_simd(
         starting_sample_idx: usize,
         destination_sample_idx: usize,
@@ -969,7 +1057,7 @@ impl MusicGrid {
             // Iter over all the nodes in the channels.
             for (position, node) in channels {
                 if let Err(err) = node.request_default_count_sample_parsing() {
-                    dbg!(err);
+                    dbg!(err.to_string());
                 };
 
                 let sound_beat_position = (*position * samples_per_beat) as usize;
@@ -1000,7 +1088,7 @@ impl MusicGrid {
 
                 // This the range the node's samples have in the buffer.
                 let node_sample_range =
-                    starting_sample_idx..destination_sample_idx.clamp(0, node_samples.len() - 1);
+                    starting_sample_idx..destination_sample_idx.clamp(0, node_samples.len());
 
                 for (idx, (buffer_chunk, node_sample_chunk)) in chunks
                     .zip(node_samples[node_sample_range].chunks_exact(32))
