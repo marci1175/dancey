@@ -1049,6 +1049,7 @@ impl MusicGrid {
         for channels in nodes.values() {
             // Iter over all the nodes in the channels.
             for (position, node) in channels {
+                // Request the nodes to resample before for the next call
                 if let Err(err) = node.request_default_count_sample_parsing() {
                     dbg!(err.to_string());
                 };
