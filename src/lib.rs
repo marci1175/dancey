@@ -1102,7 +1102,7 @@ impl MusicGrid {
                     dbg!(err.to_string());
                 };
 
-                let node_position = (*position as f32 * (sample_rate as f32 * 60.0 / beat_per_minute as f32)) as usize;
+                let node_position = (*position as f32 * (sample_rate as f32 * 60.0 / beat_per_minute as f32)).ceil() as usize;
 
                 let node_samples = node.samples_buffer.get_inner();
 
@@ -1119,7 +1119,7 @@ impl MusicGrid {
                         0..(node_sample_count).clamp(0, total_samples)
                     }
                     else {
-                        ((node_position as f32 * 1.5) as usize).clamp(0, total_samples)..(node_position + node_sample_count).clamp(0, total_samples)
+                        (node_position - starting_sample_idx..(node_position + (destination_sample_idx - node_position)) - starting_sample_idx)
                     }
                 };
 
@@ -1132,7 +1132,7 @@ impl MusicGrid {
                 let chunks = buffer_part_read.chunks_exact(32);
 
                 // This the range the buffer has in the node's samples.
-                let node_sample_range = starting_sample_idx.clamp(0, node_samples.len())
+                let node_sample_range = starting_sample_idx.checked_sub(node_position).unwrap_or(0)
                     ..destination_sample_idx.clamp(0, node_samples.len());
 
                 let node_sample_chunks = node_samples[node_sample_range].chunks_exact(32);
