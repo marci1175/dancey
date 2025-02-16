@@ -15,13 +15,10 @@ use tokio::{
 };
 
 use std::{
-    path::PathBuf,
-    sync::{atomic::AtomicUsize, Arc},
-    time::Duration,
-    usize,
+    ops::{Deref, DerefMut}, path::PathBuf, sync::{atomic::AtomicUsize, Arc}, time::{Duration, Instant}, usize
 };
 
-use crate::{playback_file, MusicGrid, PlaybackControl, Settings};
+use crate::{playback_file, MusicGrid, PlaybackControl, PlaybackTimer, Settings};
 
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaFile {
@@ -75,6 +72,9 @@ pub struct Application {
     #[serde(skip)]
     dragged_media: Option<MediaFile>,
 
+    #[serde(skip)]
+    playback_timer: Option<PlaybackTimer>,
+
     #[debug(skip)]
     #[serde(skip)]
     toasts: Toasts,
@@ -92,6 +92,7 @@ impl Default for Application {
             media_files: vec![],
             media_panel_is_open: false,
             master_audio_sink: None,
+            playback_timer: None,
             audio_playback,
             toasts: Toasts::new(),
             dragged_media: None,
@@ -210,8 +211,6 @@ impl App for Application {
                     self.music_grid.nodes.clear();
                 }
 
-                let samples_per_beat = (self.music_grid.sample_rate as usize as f32 * 60.0) / self.music_grid.beat_per_minute as f32;
-                
                 ui.add_enabled_ui(self.music_grid.last_node.is_some(), |ui| {
                     if let Some(sink) = &self.master_audio_sink {
                         if ui
@@ -229,13 +228,24 @@ impl App for Application {
 
                             if sink.is_paused() {
                                 sink.play();
+
+                                if let Some(timer) = &mut self.playback_timer {
+                                    timer.paused_time += timer.pause_started.unwrap().elapsed();
+
+                                    timer.pause_started = None;
+                                }
                             } else {
                                 sink.pause();
+                                
+                                if let Some(timer) = &mut self.playback_timer {
+                                    timer.pause_started = Some(Instant::now());
+                                }
                             }
                         }
                     } else if ui.button("Play").clicked() {
                         let sink = Arc::new(Sink::try_new(&self.audio_playback.as_ref().unwrap().1).unwrap());
                         
+                        self.playback_timer = Some(PlaybackTimer::default());
                         self.playback_idx.store(0, std::sync::atomic::Ordering::Relaxed);
                         let playback_idx = self.playback_idx.clone();
                         let sample_rate = self.music_grid.sample_rate as usize;
@@ -313,6 +323,8 @@ impl App for Application {
                             self.master_audio_sink.as_ref().unwrap().clear();
 
                             self.master_audio_sink = None;
+
+                            self.playback_timer = None;
                         }
                     }
                 });
@@ -465,24 +477,36 @@ impl App for Application {
                 let beat_dur = 60. / self.music_grid.beat_per_minute as f32
                     * (self.music_grid.beat_per_minute as f32 / 100.);
 
-                let secs_elapsed = sink.get_pos().as_secs_f32();
+                if let Some(playback_timer) = &self.playback_timer {
+                    let mut elapsed_since_start = playback_timer.playback_started.elapsed();
 
-                let x = self.music_grid.grid_rect.left()
-                    + (secs_elapsed as f32 / beat_dur) * self.music_grid.get_grid_node_width();
+                    if let Some(pause_started) = playback_timer.pause_started {
+                        elapsed_since_start -= pause_started.elapsed();
+                    }
+                    else {
+                        elapsed_since_start -= playback_timer.paused_time;
+                    }
 
-                let delta_pos = if let Some(state) = &self.music_grid.inner_state {
-                    state.state.offset
-                } else {
-                    vec2(0., 0.)
-                };
 
-                ui.painter().line(
-                    vec![
-                        Pos2::new(x - delta_pos.x, self.music_grid.grid_rect.top()),
-                        Pos2::new(x - delta_pos.x, self.music_grid.grid_rect.bottom()),
-                    ],
-                    Stroke::new(2., Color32::WHITE),
-                );
+                    let secs_elapsed = elapsed_since_start.as_secs_f32();
+
+                    let x = self.music_grid.grid_rect.left()
+                        + (secs_elapsed as f32 / beat_dur) * self.music_grid.get_grid_node_width();
+
+                    let delta_pos = if let Some(state) = &self.music_grid.inner_state {
+                        state.state.offset
+                    } else {
+                        vec2(0., 0.)
+                    };
+
+                    ui.painter().line(
+                        vec![
+                            Pos2::new(x - delta_pos.x, self.music_grid.grid_rect.top()),
+                            Pos2::new(x - delta_pos.x, self.music_grid.grid_rect.bottom()),
+                        ],
+                        Stroke::new(2., Color32::WHITE),
+                    );
+                }
             }
 
             let hovered_files = ctx.input(|reader| reader.raw.clone().hovered_files);

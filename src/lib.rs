@@ -30,7 +30,7 @@ use std::{
         atomic::AtomicU8,
         mpsc::{channel, Receiver, Sender},
         Arc,
-    },
+    }, time::{Duration, Instant},
 };
 
 use derive_more::derive::Debug;
@@ -1119,7 +1119,7 @@ impl MusicGrid {
                         0..(node_sample_count).clamp(0, total_samples)
                     }
                     else {
-                        (node_position - starting_sample_idx..(node_position + (destination_sample_idx - node_position)) - starting_sample_idx)
+                        (node_position - starting_sample_idx)..(node_position + (destination_sample_idx - node_position)) - starting_sample_idx
                     }
                 };
 
@@ -1410,4 +1410,17 @@ pub enum PlaybackControl {
     Stop,
     /// Seek in the samples.
     Seek(usize)
+}
+
+#[derive(Debug, Clone)]
+pub struct PlaybackTimer {
+    playback_started: Instant,
+    pause_started: Option<Instant>,
+    paused_time: Duration,
+}
+
+impl Default for PlaybackTimer {
+    fn default() -> Self {
+        Self { playback_started: Instant::now(), pause_started: None, paused_time: Duration::from_secs_f32(0.) }
+    }
 }
