@@ -259,13 +259,12 @@ impl App for Application {
 
                         // Dont change this unless youve chnaged the value in buffer_preview_samples_simd
                         let sample_length_secs = 3;
-                        let width_per_node = self.music_grid.get_grid_node_width();
 
                         tokio::spawn(async move {
                             let starting_idx = playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed);
                             let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
 
-                            let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, beat_per_minute as usize, width_per_node, &nodes);
+                            let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, beat_per_minute as usize, &nodes);
                     
                             sink_clone.append(SamplesBuffer::new(
                                 2,
@@ -282,7 +281,7 @@ impl App for Application {
                                             let starting_idx = playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed);
                                             let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
 
-                                            let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, beat_per_minute as usize, width_per_node, &nodes);
+                                            let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, beat_per_minute as usize, &nodes);
                         
                                             sink_clone.append(SamplesBuffer::new(
                                                 2,
@@ -328,6 +327,16 @@ impl App for Application {
                         }
                     }
                 });
+
+                ui.label(format!("Elapsed: {}s", if let Some(timer) = &self.playback_timer {
+                    let elapsed_paused = timer.pause_started.map(|instant| { instant.elapsed() }).unwrap_or(Duration::default());
+
+                    let time_playing = timer.playback_started.elapsed() - elapsed_paused - timer.paused_time;
+                    
+                    time_playing.as_secs_f32()
+                } else {
+                    0.0
+                }));
 
                 if let Some(sink) = &self.master_audio_sink {
                     sink.set_volume(
@@ -481,7 +490,7 @@ impl App for Application {
                     let mut elapsed_since_start = playback_timer.playback_started.elapsed();
 
                     if let Some(pause_started) = playback_timer.pause_started {
-                        elapsed_since_start -= pause_started.elapsed();
+                        elapsed_since_start -= (pause_started.elapsed() + playback_timer.paused_time);
                     }
                     else {
                         elapsed_since_start -= playback_timer.paused_time;

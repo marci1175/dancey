@@ -1085,7 +1085,6 @@ impl MusicGrid {
         destination_sample_idx: usize,
         sample_rate: usize,
         beat_per_minute: usize,
-        grid_node_width: f32,
         nodes: &ItemGroup<usize, usize, SoundNode>,
     ) -> Vec<f32> {
         // This is the count of samples the final output will contain.
@@ -1403,6 +1402,7 @@ impl<T: Clone> SampleBuffer<T> {
     }
 }
 
+/// The controls the playback can receive.
 pub enum PlaybackControl {
     /// Pause / Unpause the stream.
     Pause,
@@ -1412,10 +1412,16 @@ pub enum PlaybackControl {
     Seek(usize)
 }
 
+/// Holds information about playback times, this helps me display the cursor to show where the music's progress is currently at.
 #[derive(Debug, Clone)]
 pub struct PlaybackTimer {
+    /// The [`Instant`] this playback was started.
     playback_started: Instant,
+
+    /// This holds the [`Instant`] when the current pause has started.
     pause_started: Option<Instant>,
+
+    /// This holds the sum of the times the playback was paused.
     paused_time: Duration,
 }
 
