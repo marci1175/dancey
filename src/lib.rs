@@ -20,7 +20,6 @@ use symphonia::core::{
 };
 
 use std::{
-    collections::HashMap,
     fs::{self, File},
     hash::Hash,
     io::{BufReader, Cursor},
@@ -31,7 +30,8 @@ use std::{
         atomic::AtomicU8,
         mpsc::{channel, Receiver, Sender},
         Arc,
-    }, time::{Duration, Instant},
+    },
+    time::{Duration, Instant},
 };
 
 use derive_more::derive::Debug;
@@ -80,10 +80,8 @@ impl SoundNode {
 
         let track_sample_rate = track_params.sample_rate.unwrap();
 
-        let samples_buffer_handle = SampleBuffer::new(
-            (sample_rate * 2) as usize,
-            (sample_rate as f64 * duration) as usize,
-        );
+        let samples_buffer_handle =
+            SampleBuffer::new(sample_rate * 2, (sample_rate as f64 * duration) as usize);
 
         let samples_buffer_handle_clone = samples_buffer_handle.clone();
 
@@ -151,7 +149,7 @@ impl SoundNode {
                         < (desired_decoded_sample_length / decoded_packet_sample_count)
                     {
                         let partial_buffer = resampler
-                            .process_partial(Some(&vec![left_buffer, right_buffer]), None)
+                            .process_partial(Some(&[left_buffer, right_buffer]), None)
                             .unwrap();
 
                         for channels in partial_buffer.windows(2) {
@@ -195,13 +193,15 @@ impl SoundNode {
                         right_buffer.extend(right.to_vec());
 
                         // Decode all of the packets we can right now
-                        while let Some(_) =
-                            left_buffer.clone().get(0..resampler.input_frames_next())
+                        while left_buffer
+                            .clone()
+                            .get(0..resampler.input_frames_next())
+                            .is_some()
                         {
                             // Create a buffer from the left and right buffers
                             let buffer = resampler
                                 .process(
-                                    &vec![
+                                    &[
                                         left_buffer
                                             .drain(0..resampler.input_frames_next())
                                             .collect::<Vec<f32>>(),
@@ -537,7 +537,7 @@ impl<K: Eq + Hash, IK: Eq + Hash, V> ItemGroup<K, IK, V> {
     pub fn value_len(&self) -> usize {
         self.inner.len()
     }
-    
+
     /// Returns an iterator over all `IndexMap<IK, V>` values in the `ItemGroup`.
     pub fn values(&self) -> dashmap::iter::Iter<'_, K, IndexMap<IK, V>> {
         self.inner.iter()
@@ -1044,7 +1044,7 @@ impl MusicGrid {
                 let node_sample_count =
                     (node.duration * node.track_params.sample_rate.unwrap() as f64) as usize;
 
-                let sound_beat_position = (*position * samples_per_beat) as usize;
+                let sound_beat_position = *position * samples_per_beat;
 
                 let buffer_part_read =
                     buffer[sound_beat_position..(sound_beat_position + node_sample_count)].to_vec();
@@ -1092,14 +1092,17 @@ impl MusicGrid {
                     dbg!(err.to_string());
                 };
 
-                let node_position = ((*position as f32 * (sample_rate as f32)).ceil() * 2.) as usize;
+                let node_position =
+                    ((*position as f32 * (sample_rate as f32)).ceil() * 2.) as usize;
 
                 let node_samples = node.samples_buffer.get_inner();
 
                 let node_sample_count = node_samples.len();
 
                 // If the end of the sample / musicnode is smaller than the starting sample idx, skip this node
-                if (node_position + node_sample_count) < starting_sample_idx || destination_sample_idx < node_position {
+                if (node_position + node_sample_count) < starting_sample_idx
+                    || destination_sample_idx < node_position
+                {
                     continue;
                 }
 
@@ -1107,9 +1110,10 @@ impl MusicGrid {
                 let node_buffer_range = {
                     if node_position < starting_sample_idx {
                         0..(node_sample_count).clamp(0, total_samples)
-                    }
-                    else {
-                        (node_position - starting_sample_idx)..(node_position + (destination_sample_idx - node_position)) - starting_sample_idx
+                    } else {
+                        (node_position - starting_sample_idx)
+                            ..(node_position + (destination_sample_idx - node_position))
+                                - starting_sample_idx
                     }
                 };
 
@@ -1122,7 +1126,7 @@ impl MusicGrid {
                 let chunks = buffer_part_read.chunks_exact(32);
 
                 // This the range the buffer has in the node's samples.
-                let node_sample_range = starting_sample_idx.checked_sub(node_position).unwrap_or(0)
+                let node_sample_range = starting_sample_idx.saturating_sub(node_position)
                     ..destination_sample_idx.clamp(0, node_samples.len());
 
                 let node_sample_chunks = node_samples[node_sample_range].chunks_exact(32);
@@ -1159,8 +1163,7 @@ impl MusicGrid {
                     );
 
                     safe_slice.copy_from_slice(
-                        &add_result.to_array()
-                            [0..chunks_remainder.len().checked_sub(1).unwrap_or(0)],
+                        &add_result.to_array()[0..chunks_remainder.len().saturating_sub(1)],
                     );
                 }
             }
@@ -1306,7 +1309,7 @@ impl<T> ChunkBuffer<T> {
 
     pub fn from_vec(chunk_size: usize, slice: Vec<T>) -> Self {
         Self {
-            chunk_size: chunk_size,
+            chunk_size,
             inner_buffer: slice,
         }
     }
@@ -1400,7 +1403,7 @@ pub enum PlaybackControl {
     /// Shutdown the stream.
     Stop,
     /// Seek in the samples.
-    Seek(usize)
+    Seek(usize),
 }
 
 /// Holds information about playback times, this helps me display the cursor to show where the music's progress is currently at.
@@ -1418,6 +1421,10 @@ pub struct PlaybackTimer {
 
 impl Default for PlaybackTimer {
     fn default() -> Self {
-        Self { playback_started: Instant::now(), pause_started: None, paused_time: Duration::from_secs_f32(0.) }
+        Self {
+            playback_started: Instant::now(),
+            pause_started: None,
+            paused_time: Duration::from_secs_f32(0.),
+        }
     }
 }

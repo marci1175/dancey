@@ -15,7 +15,10 @@ use tokio::{
 };
 
 use std::{
-    ops::{Deref, DerefMut}, path::PathBuf, sync::{atomic::AtomicUsize, Arc}, time::{Duration, Instant}, usize
+    path::PathBuf,
+    sync::{atomic::AtomicUsize, Arc},
+    time::{Duration, Instant},
+    usize,
 };
 
 use crate::{playback_file, MusicGrid, PlaybackControl, PlaybackTimer, Settings};
@@ -488,16 +491,15 @@ impl App for Application {
                     let mut elapsed_since_start = playback_timer.playback_started.elapsed();
 
                     if let Some(pause_started) = playback_timer.pause_started {
-                        elapsed_since_start -= (pause_started.elapsed() + playback_timer.paused_time);
-                    }
-                    else {
+                        elapsed_since_start -= pause_started.elapsed() + playback_timer.paused_time;
+                    } else {
                         elapsed_since_start -= playback_timer.paused_time;
                     }
 
                     let secs_elapsed = elapsed_since_start.as_secs_f32();
 
                     let x = self.music_grid.grid_rect.left()
-                        + (secs_elapsed as f32 / beat_dur) * self.music_grid.get_grid_node_width();
+                        + (secs_elapsed / beat_dur) * self.music_grid.get_grid_node_width();
 
                     let delta_pos = if let Some(state) = &self.music_grid.inner_state {
                         state.state.offset
