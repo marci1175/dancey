@@ -3,6 +3,7 @@
 // Link the file with the UI and the application's source code.
 pub mod app;
 
+use dashmap::DashMap;
 use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
@@ -473,34 +474,25 @@ fn parse_audio_file_to_buffer(
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
 pub struct ItemGroup<K: Eq + Hash, IK: Eq + Hash, V> {
     /// The inner value of the [`ItemGroup`].
-    inner: HashMap<K, IndexMap<IK, V>>,
-
-    /// A default capacity for a value.
-    /// If this is ```None``` then ```Vec::new()``` is used when creating a new key-value pair.
-    with_capacity: Option<usize>,
+    inner: DashMap<K, IndexMap<IK, V>>,
 }
 
 impl<K: Eq + Hash, IK: Eq + Hash, V> ItemGroup<K, IK, V> {
     /// Creates a new [`ItemGroup`] instance.
     pub fn new() -> Self {
         Self {
-            inner: HashMap::new(),
-            with_capacity: None,
+            inner: DashMap::new(),
         }
     }
 
-    /// Creates a new [`ItemGroup`] instance with a default capacity for the values.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            inner: HashMap::new(),
-            with_capacity: Some(capacity),
-        }
+    pub fn inner(&self) -> &DashMap<K, IndexMap<IK, V>> {
+        &self.inner
     }
 
     /// Inserts a value to a value of a key.
     /// If the key does not exist it automaticly inserts the key and the value into the [`HashMap`].
-    pub fn insert(&mut self, key: K, inner_key: IK, value: V) {
-        if let Some(group) = self.inner.get_mut(&key) {
+    pub fn insert(&self, key: K, inner_key: IK, value: V) {
+        if let Some(mut group) = self.inner.get_mut(&key) {
             group.insert(inner_key, value);
         } else {
             let mut new_map = IndexMap::new();
@@ -512,8 +504,8 @@ impl<K: Eq + Hash, IK: Eq + Hash, V> ItemGroup<K, IK, V> {
     }
 
     /// If the key does not exist, it will not return any errors.
-    pub fn remove(&mut self, key: &K, inner_key: IK) -> Option<V> {
-        if let Some(group) = self.inner.get_mut(key) {
+    pub fn remove(&self, key: &K, inner_key: IK) -> Option<V> {
+        if let Some(mut group) = self.inner.get_mut(key) {
             return group.swap_remove(&inner_key);
         }
 
@@ -521,17 +513,17 @@ impl<K: Eq + Hash, IK: Eq + Hash, V> ItemGroup<K, IK, V> {
     }
 
     /// Returns an immutable reference to a value.
-    pub fn get(&self, key: K) -> Option<&IndexMap<IK, V>> {
+    pub fn get(&self, key: K) -> Option<dashmap::mapref::one::Ref<'_, K, IndexMap<IK, V>>> {
         self.inner.get(&key)
     }
 
     /// Returns a mutable reference to a value.
-    pub fn get_mut(&mut self, key: K) -> Option<&mut IndexMap<IK, V>> {
+    pub fn get_mut(&self, key: K) -> Option<dashmap::mapref::one::RefMut<'_, K, IndexMap<IK, V>>> {
         self.inner.get_mut(&key)
     }
 
     /// Clears the [`ItemGroup`]'s inner [`IndexMap`],.
-    pub fn clear(&mut self) {
+    pub fn clear(&self) {
         self.inner.clear();
     }
 
@@ -543,17 +535,17 @@ impl<K: Eq + Hash, IK: Eq + Hash, V> ItemGroup<K, IK, V> {
     /// Returns the count of the values in the entries.
     /// Aka returns a sum of the values' length.
     pub fn value_len(&self) -> usize {
-        self.inner.values().map(|val| val.len()).sum()
+        self.inner.len()
     }
-
+    
     /// Returns an iterator over all `IndexMap<IK, V>` values in the `ItemGroup`.
-    pub fn values(&self) -> impl Iterator<Item = &IndexMap<IK, V>> {
-        self.inner.values()
+    pub fn values(&self) -> dashmap::iter::Iter<'_, K, IndexMap<IK, V>> {
+        self.inner.iter()
     }
 
     /// Returns a mutable iterator over all `IndexMap<IK, V>` values in the `ItemGroup`.
-    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut IndexMap<IK, V>> {
-        self.inner.values_mut()
+    pub fn values_mut(&self) -> dashmap::iter::IterMut<'_, K, indexmap::IndexMap<IK, V>> {
+        self.inner.iter_mut()
     }
 }
 
@@ -597,7 +589,7 @@ pub struct MusicGrid {
     /// This field contains all of the [`SoundNode`]-s.
     /// The key is the track's index, and the value is a list of [`SoundNode`]-s.
     /// The [`ItemGroup`]'s key is the channels index and the key is `(usize, SoundNode)`, the usize indicating the position of the [`SoundNode`].
-    nodes: ItemGroup<usize, usize, SoundNode>,
+    nodes: Arc<ItemGroup<usize, usize, SoundNode>>,
 
     /// Track count, this shows the count of track's available and allocated.
     track_count: usize,
@@ -637,7 +629,7 @@ impl Default for MusicGrid {
         let (dnd_sender, dnd_receiver) = channel();
 
         Self {
-            nodes: ItemGroup::new(),
+            nodes: Arc::new(ItemGroup::new()),
             track_count: 1,
             inner_state: None,
             beat_per_minute: 100,
@@ -659,7 +651,7 @@ impl MusicGrid {
         let (dnd_sender, dnd_receiver) = channel();
 
         Self {
-            nodes: ItemGroup::new(),
+            nodes: Arc::new(ItemGroup::new()),
             track_count,
             inner_state: None,
             beat_per_minute: 100,
@@ -777,7 +769,7 @@ impl MusicGrid {
                         let mut was_table_modified = false;
 
                         for row in row_range {
-                            if let Some(sound_nodes) = self.nodes.get_mut(row) {
+                            if let Some(mut sound_nodes) = self.nodes.inner().get_mut(&row) {
                                 for (idx, (position, node)) in
                                     sound_nodes.clone().iter().enumerate()
                                 {
@@ -1048,7 +1040,7 @@ impl MusicGrid {
         let mut buffer: Vec<f32> = vec![0.0; total_samples];
 
         for nodes in self.nodes.values() {
-            for (position, node) in nodes {
+            for (position, node) in nodes.iter() {
                 let node_sample_count =
                     (node.duration * node.track_params.sample_rate.unwrap() as f64) as usize;
 
@@ -1084,8 +1076,7 @@ impl MusicGrid {
         starting_sample_idx: usize,
         destination_sample_idx: usize,
         sample_rate: usize,
-        beat_per_minute: usize,
-        nodes: &ItemGroup<usize, usize, SoundNode>,
+        nodes: Arc<ItemGroup<usize, usize, SoundNode>>,
     ) -> Vec<f32> {
         // This is the count of samples the final output will contain.
         let total_samples = destination_sample_idx - starting_sample_idx;
@@ -1095,13 +1086,13 @@ impl MusicGrid {
         // Iter over all the channels.
         for channels in nodes.values() {
             // Iter over all the nodes in the channels.
-            for (position, node) in channels {
+            for (position, node) in channels.iter() {
                 // Request the nodes to resample before for the next call
                 if let Err(err) = node.request_default_count_sample_parsing() {
                     dbg!(err.to_string());
                 };
 
-                let node_position = (*position as f32 * (sample_rate as f32 * 60.0 / beat_per_minute as f32)).ceil() as usize;
+                let node_position = ((*position as f32 * (sample_rate as f32)).ceil() * 2.) as usize;
 
                 let node_samples = node.samples_buffer.get_inner();
 
@@ -1194,7 +1185,7 @@ impl MusicGrid {
         let mut buffer: Vec<f32> = vec![0.0; total_samples];
 
         for nodes in self.nodes.values() {
-            for (position, node) in nodes {
+            for (position, node) in nodes.iter() {
                 let node_sample_count =
                     (node.duration * last_node.track_params.sample_rate.unwrap() as f64) as usize;
 

@@ -208,7 +208,7 @@ impl App for Application {
                 ui.add(Slider::new(self.music_grid.beat_per_minute_mut(), 1..=495));
 
                 if ui.button("Clear MusicGrid").clicked() {
-                    self.music_grid.nodes.clear();
+                    self.music_grid.nodes.inner().clear();
                 }
 
                 ui.add_enabled_ui(self.music_grid.last_node.is_some(), |ui| {
@@ -250,7 +250,6 @@ impl App for Application {
                         let playback_idx = self.playback_idx.clone();
                         let sample_rate = self.music_grid.sample_rate as usize;
                         let nodes = self.music_grid.nodes.clone();
-                        let beat_per_minute = self.music_grid.beat_per_minute;
                         let sink_clone = sink.clone();
 
                         let (sender, mut receiver) = channel::<PlaybackControl>(200);
@@ -259,13 +258,13 @@ impl App for Application {
 
                         // Dont change this unless youve chnaged the value in buffer_preview_samples_simd
                         let sample_length_secs = 3;
-
+                        
                         tokio::spawn(async move {
                             let starting_idx = playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed);
                             let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
 
-                            let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, beat_per_minute as usize, &nodes);
-                    
+                            let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, nodes.clone());
+                            
                             sink_clone.append(SamplesBuffer::new(
                                 2,
                                 sample_rate as u32,
@@ -281,7 +280,7 @@ impl App for Application {
                                             let starting_idx = playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed);
                                             let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
 
-                                            let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, beat_per_minute as usize, &nodes);
+                                            let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, nodes.clone());
                         
                                             sink_clone.append(SamplesBuffer::new(
                                                 2,
@@ -483,8 +482,7 @@ impl App for Application {
             self.music_grid.show(ui);
 
             if let Some(sink) = &self.master_audio_sink {
-                let beat_dur = 60. / self.music_grid.beat_per_minute as f32
-                    * (self.music_grid.beat_per_minute as f32 / 100.);
+                let beat_dur = 60. / (self.music_grid.beat_per_minute) as f32;
 
                 if let Some(playback_timer) = &self.playback_timer {
                     let mut elapsed_since_start = playback_timer.playback_started.elapsed();
@@ -495,7 +493,6 @@ impl App for Application {
                     else {
                         elapsed_since_start -= playback_timer.paused_time;
                     }
-
 
                     let secs_elapsed = elapsed_since_start.as_secs_f32();
 
