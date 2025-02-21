@@ -271,14 +271,14 @@ impl App for Application {
                             sink_clone.append(SamplesBuffer::new(
                                 2,
                                 sample_rate as u32,
-                                samples,
+                                samples.clone(),
                             ));
 
                             let mut should_playback = true;
 
                             loop {
                                 select! {
-                                    _ = tokio::time::sleep(Duration::from_secs(sample_length_secs as u64)) => {
+                                    _ = tokio::time::sleep(Duration::from_secs_f32(sample_length_secs as f32)) => {
                                         if should_playback {
                                             let starting_idx = playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed);
                                             let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
@@ -288,7 +288,7 @@ impl App for Application {
                                             sink_clone.append(SamplesBuffer::new(
                                                 2,
                                                 sample_rate as u32,
-                                                samples,
+                                                samples.clone(),
                                             ));
                                         }
                                     },

@@ -53,7 +53,7 @@ pub struct SoundNode {
 
     #[serde(skip)]
     #[debug(skip)]
-    resampling_request_channel: Sender<usize>,
+    resampling_request_channel: Option<Sender<usize>>,
 
     track_params: NodeCodecParameters,
 
@@ -62,12 +62,11 @@ pub struct SoundNode {
 
 impl Default for SoundNode {
     fn default() -> Self {
-        let (sender, _) = channel();
         Self {
             name: String::default(),
             samples_buffer: SampleBuffer::default(),
             raw_data: vec![],
-            resampling_request_channel: sender,
+            resampling_request_channel: None,
             track_params: NodeCodecParameters::default(),
             duration: 0.,
         }
@@ -101,89 +100,46 @@ impl SoundNode {
         // Create communication channels
         let (sender, receiver) = channel();
 
+        // Get the first packet, to get the sample count.
+        let first_packet = packet_list.first().unwrap().clone();
+
         // Create sample parsing thread
         std::thread::spawn(move || {
             // Constanly wait for an incoming sample parsing message.
             loop {
-                if let Ok(desired_decoded_sample_length) = receiver.recv() {
-                    // Allocate both left and right channel buffers.
-                    let mut left_buffer = vec![];
-                    let mut right_buffer = vec![];
-
-                    // Create a handle to the master buffer.
-                    let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
-
-                    // Get the first packet, to get the sample count.
-                    let first_packet = packet_list.first().unwrap();
-
-                    // First we decode the very first packet, to get information about one packet
-                    let decoded_packet_sample_count = decoder
-                        .decode(&Packet::new_from_boxed_slice(
-                            first_packet.track_id,
-                            first_packet.ts,
-                            first_packet.dur,
-                            first_packet.data.clone(),
-                        ))
-                        .unwrap()
-                        .capacity();
-
-                    // We decode the first packet "manually" and add it to the left and right buffer. This will get ingested with the next packet.
-                    let last_decoded = decoder.last_decoded();
-
-                    // Create an audio buffer, a place for the samples.
-                    let mut audio_buffer: AudioBuffer<f32> =
-                        AudioBuffer::new(last_decoded.capacity() as u64, *last_decoded.spec());
-
-                    // Convert the packet to the desired AudioBuffer
-                    last_decoded.convert(&mut audio_buffer);
-
-                    // Get the stereo channels of the decoded packet.
-                    let (left, right) = audio_buffer.chan_pair_mut(0, 1);
-
-                    // Extend both left and right buffers with the decoded samples channels.
-                    left_buffer.extend(left.to_vec());
-                    right_buffer.extend(right.to_vec());
-
-                    // If there are less packets than desired in the raw_data this means we have come to the last of the raw samples.
-                    if packet_list.len()
-                        < (desired_decoded_sample_length / decoded_packet_sample_count)
-                    {
-                        let partial_buffer = resampler
-                            .process_partial(Some(&[left_buffer, right_buffer]), None)
-                            .unwrap();
-
-                        for channels in partial_buffer.windows(2) {
-                            for i in 0..channels[0].len() {
-                                chunk_buffer.push(channels[0][i]);
-                                chunk_buffer.push(channels[1][i]);
-                            }
+                match receiver.recv() {
+                    Ok(desired_decoded_sample_length) => {
+                        if packet_list.is_empty() {
+                            return;
                         }
 
-                        return;
-                    }
+                        // Allocate both left and right channel buffers.
+                        let mut left_buffer = vec![];
+                        let mut right_buffer = vec![];
 
-                    // We do not have to worry about leftover samples, or handling the samples' end as the line above will protect us from any kind of error.
-                    for sample_packet in packet_list
-                        .drain(0..(desired_decoded_sample_length / decoded_packet_sample_count))
-                    {
-                        let decoded_packet = decoder
+                        // Create a handle to the master buffer.
+                        let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
+
+                        // First we decode the very first packet, to get information about one packet
+                        let decoded_packet_sample_count = decoder
                             .decode(&Packet::new_from_boxed_slice(
-                                sample_packet.track_id,
-                                sample_packet.ts,
-                                sample_packet.dur,
-                                sample_packet.data,
+                                first_packet.track_id,
+                                first_packet.ts,
+                                first_packet.dur,
+                                first_packet.data.clone(),
                             ))
-                            .unwrap();
+                            .unwrap()
+                            .capacity();
 
-                        // I might be able to move this outside the loop
+                        // We decode the first packet "manually" and add it to the left and right buffer. This will get ingested with the next packet.
+                        let last_decoded = decoder.last_decoded();
+
                         // Create an audio buffer, a place for the samples.
-                        let mut audio_buffer: AudioBuffer<f32> = AudioBuffer::new(
-                            decoded_packet.capacity() as u64,
-                            *decoded_packet.spec(),
-                        );
+                        let mut audio_buffer: AudioBuffer<f32> =
+                            AudioBuffer::new(last_decoded.capacity() as u64, *last_decoded.spec());
 
                         // Convert the packet to the desired AudioBuffer
-                        decoded_packet.convert(&mut audio_buffer);
+                        last_decoded.convert(&mut audio_buffer);
 
                         // Get the stereo channels of the decoded packet.
                         let (left, right) = audio_buffer.chan_pair_mut(0, 1);
@@ -192,6 +148,37 @@ impl SoundNode {
                         left_buffer.extend(left.to_vec());
                         right_buffer.extend(right.to_vec());
 
+                        // We do not have to worry about leftover samples, or handling the samples' end as the line above will protect us from any kind of error.
+                        for sample_packet in packet_list
+                            .drain(0..(desired_decoded_sample_length as usize / decoded_packet_sample_count).clamp(0, packet_list.len()))
+                        {
+                            let decoded_packet = decoder
+                                .decode(&Packet::new_from_boxed_slice(
+                                    sample_packet.track_id,
+                                    sample_packet.ts,
+                                    sample_packet.dur,
+                                    sample_packet.data,
+                                ))
+                                .unwrap();
+
+                            // I might be able to move this outside the loop
+                            // Create an audio buffer, a place for the samples.
+                            let mut audio_buffer: AudioBuffer<f32> = AudioBuffer::new(
+                                decoded_packet.capacity() as u64,
+                                *decoded_packet.spec(),
+                            );
+
+                            // Convert the packet to the desired AudioBuffer
+                            decoded_packet.convert(&mut audio_buffer);
+
+                            // Get the stereo channels of the decoded packet.
+                            let (left, right) = audio_buffer.chan_pair_mut(0, 1);
+
+                            // Extend both left and right buffers with the decoded samples channels.
+                            left_buffer.extend(left.to_vec());
+                            right_buffer.extend(right.to_vec());
+                        }
+                    
                         // Decode all of the packets we can right now
                         while left_buffer
                             .clone()
@@ -214,13 +201,18 @@ impl SoundNode {
                                 .unwrap();
 
                             // Add the samples to the master buffer
-                            for channels in buffer.windows(2) {
-                                for i in 0..channels[0].len() {
-                                    chunk_buffer.push(channels[0][i]);
-                                    chunk_buffer.push(channels[1][i]);
+                            for channel in buffer.windows(2) {
+                                for i in 0..channel[0].len() {
+                                    chunk_buffer.push(channel[0][i]);
+                                    chunk_buffer.push(channel[1][i]);
                                 }
                             }
                         }
+                    }
+                    Err(err) => {
+                        dbg!(err);
+
+                        break;
                     }
                 }
             }
@@ -229,7 +221,7 @@ impl SoundNode {
         Ok(Self {
             name,
             raw_data,
-            resampling_request_channel: sender,
+            resampling_request_channel: Some(sender),
             samples_buffer: samples_buffer_handle,
             track_params: NodeCodecParameters::new(
                 track_params.sample_rate,
@@ -260,16 +252,16 @@ impl SoundNode {
     /// This function sends a request in the inner channel with the size of `sample_rate * 3 * 2`. This is going to make it so that it will parse 3 seconds of stereo samples.
     pub fn request_default_count_sample_parsing(
         &self,
-    ) -> Result<(), std::sync::mpsc::SendError<usize>> {
-        self.resampling_request_channel
-            .send(self.track_params.sample_rate.unwrap() as usize * 3 * 2)
+    ) -> anyhow::Result<()> {
+        Ok(self.resampling_request_channel.clone().ok_or(anyhow::Error::msg("Sample requesting channel is None."))?
+        .send(self.track_params.sample_rate.unwrap() as usize * 3 * 2)?)
     }
 
     pub fn request_custom_count_sample_parsing(
         &self,
         count: usize,
-    ) -> Result<(), std::sync::mpsc::SendError<usize>> {
-        self.resampling_request_channel.send(count)
+    ) -> anyhow::Result<()> {
+        Ok(self.resampling_request_channel.clone().ok_or(anyhow::Error::msg("Sample requesting channel is None."))?.send(count)?)
     }
 }
 
@@ -1087,24 +1079,24 @@ impl MusicGrid {
         for channels in nodes.values() {
             // Iter over all the nodes in the channels.
             for (position, node) in channels.iter() {
-                // Request the nodes to resample before for the next call
-                if let Err(err) = node.request_default_count_sample_parsing() {
-                    dbg!(err.to_string());
-                };
-
                 let node_position =
                     ((*position as f32 * (sample_rate as f32)).ceil() * 2.) as usize;
 
                 let node_samples = node.samples_buffer.get_inner();
 
                 let node_sample_count = node_samples.len();
-
+                
                 // If the end of the sample / musicnode is smaller than the starting sample idx, skip this node
                 if (node_position + node_sample_count) < starting_sample_idx
                     || destination_sample_idx < node_position
                 {
                     continue;
                 }
+
+                // Request the nodes to resample before for the next call
+                if let Err(err) = node.request_default_count_sample_parsing() {
+                    dbg!(err.to_string());
+                };
 
                 // The range the Node has in the buffer.
                 let node_buffer_range = {
