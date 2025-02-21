@@ -3,6 +3,7 @@
 // Link the file with the UI and the application's source code.
 pub mod app;
 
+use app::AUDIO_BUFFER_SIZE_S;
 use dashmap::DashMap;
 use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2};
 use indexmap::IndexMap;
@@ -147,7 +148,7 @@ impl SoundNode {
                         // Extend both left and right buffers with the decoded samples channels.
                         left_buffer.extend(left.to_vec());
                         right_buffer.extend(right.to_vec());
-
+                        
                         // We do not have to worry about leftover samples, or handling the samples' end as the line above will protect us from any kind of error.
                         for sample_packet in packet_list
                             .drain(0..(desired_decoded_sample_length as usize / decoded_packet_sample_count).clamp(0, packet_list.len()))
@@ -160,13 +161,6 @@ impl SoundNode {
                                     sample_packet.data,
                                 ))
                                 .unwrap();
-
-                            // I might be able to move this outside the loop
-                            // Create an audio buffer, a place for the samples.
-                            let mut audio_buffer: AudioBuffer<f32> = AudioBuffer::new(
-                                decoded_packet.capacity() as u64,
-                                *decoded_packet.spec(),
-                            );
 
                             // Convert the packet to the desired AudioBuffer
                             decoded_packet.convert(&mut audio_buffer);
@@ -254,7 +248,7 @@ impl SoundNode {
         &self,
     ) -> anyhow::Result<()> {
         Ok(self.resampling_request_channel.clone().ok_or(anyhow::Error::msg("Sample requesting channel is None."))?
-        .send(self.track_params.sample_rate.unwrap() as usize * 3 * 2)?)
+        .send(self.track_params.sample_rate.unwrap() as usize * AUDIO_BUFFER_SIZE_S * 2)?)
     }
 
     pub fn request_custom_count_sample_parsing(
@@ -1085,7 +1079,7 @@ impl MusicGrid {
                 let node_samples = node.samples_buffer.get_inner();
 
                 let node_sample_count = node_samples.len();
-                
+
                 // If the end of the sample / musicnode is smaller than the starting sample idx, skip this node
                 if (node_position + node_sample_count) < starting_sample_idx
                     || destination_sample_idx < node_position

@@ -1,3 +1,4 @@
+pub const AUDIO_BUFFER_SIZE_S: usize = 3;
 const SUPPORTED_TYPES: [&str; 3] = ["wav", "mp3", "flac"];
 
 use eframe::{App, CreationContext};
@@ -259,11 +260,8 @@ impl App for Application {
 
                         self.playback_thread_sender = Some(sender);
 
-                        // Dont change this unless youve chnaged the value in buffer_preview_samples_simd
-                        let sample_length_secs = 3;
-                        
                         tokio::spawn(async move {
-                            let starting_idx = playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed);
+                            let starting_idx = playback_idx.fetch_add(sample_rate * AUDIO_BUFFER_SIZE_S * 2, std::sync::atomic::Ordering::Relaxed);
                             let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
 
                             let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, nodes.clone());
@@ -278,9 +276,9 @@ impl App for Application {
 
                             loop {
                                 select! {
-                                    _ = tokio::time::sleep(Duration::from_secs_f32(sample_length_secs as f32)) => {
+                                    _ = tokio::time::sleep(Duration::from_secs_f32(AUDIO_BUFFER_SIZE_S as f32)) => {
                                         if should_playback {
-                                            let starting_idx = playback_idx.fetch_add(sample_rate * sample_length_secs * 2, std::sync::atomic::Ordering::Relaxed);
+                                            let starting_idx = playback_idx.fetch_add(sample_rate * AUDIO_BUFFER_SIZE_S * 2, std::sync::atomic::Ordering::Relaxed);
                                             let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
 
                                             let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, nodes.clone());
