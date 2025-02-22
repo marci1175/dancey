@@ -54,7 +54,7 @@ pub struct SoundNode {
 
     #[serde(skip)]
     #[debug(skip)]
-    resampling_request_channel: Option<Sender<usize>>,
+    resampling_request_channel: Option<Sender<(Option<usize>, usize)>>,
 
     track_params: NodeCodecParameters,
 
@@ -109,7 +109,7 @@ impl SoundNode {
             // Constanly wait for an incoming sample parsing message.
             loop {
                 match receiver.recv() {
-                    Ok(desired_decoded_sample_length) => {
+                    Ok((destination, desired_decoded_sample_length)) => {
                         if packet_list.is_empty() {
                             return;
                         }
@@ -148,11 +148,13 @@ impl SoundNode {
                         // Extend both left and right buffers with the decoded samples channels.
                         left_buffer.extend(left.to_vec());
                         right_buffer.extend(right.to_vec());
-                        
+
                         // We do not have to worry about leftover samples, or handling the samples' end as the line above will protect us from any kind of error.
-                        for sample_packet in packet_list
-                            .drain(0..(desired_decoded_sample_length as usize / decoded_packet_sample_count).clamp(0, packet_list.len()))
-                        {
+                        for sample_packet in packet_list.drain(
+                            0..(desired_decoded_sample_length as usize
+                                / decoded_packet_sample_count)
+                                .clamp(0, packet_list.len()),
+                        ) {
                             let decoded_packet = decoder
                                 .decode(&Packet::new_from_boxed_slice(
                                     sample_packet.track_id,
@@ -172,7 +174,7 @@ impl SoundNode {
                             left_buffer.extend(left.to_vec());
                             right_buffer.extend(right.to_vec());
                         }
-                    
+
                         // Decode all of the packets we can right now
                         while left_buffer
                             .clone()
@@ -244,18 +246,23 @@ impl SoundNode {
     }
 
     /// This function sends a request in the inner channel with the size of `sample_rate * 3 * 2`. This is going to make it so that it will parse 3 seconds of stereo samples.
-    pub fn request_default_count_sample_parsing(
-        &self,
-    ) -> anyhow::Result<()> {
-        Ok(self.resampling_request_channel.clone().ok_or(anyhow::Error::msg("Sample requesting channel is None."))?
-        .send(self.track_params.sample_rate.unwrap() as usize * AUDIO_BUFFER_SIZE_S * 2)?)
+    pub fn request_default_count_sample_parsing(&self) -> anyhow::Result<()> {
+        Ok(self
+            .resampling_request_channel
+            .clone()
+            .ok_or(anyhow::Error::msg("Sample requesting channel is None."))?
+            .send((
+                None,
+                self.track_params.sample_rate.unwrap() as usize * AUDIO_BUFFER_SIZE_S * 2,
+            ))?)
     }
 
-    pub fn request_custom_count_sample_parsing(
-        &self,
-        count: usize,
-    ) -> anyhow::Result<()> {
-        Ok(self.resampling_request_channel.clone().ok_or(anyhow::Error::msg("Sample requesting channel is None."))?.send(count)?)
+    pub fn request_custom_count_sample_parsing(&self, count: usize) -> anyhow::Result<()> {
+        Ok(self
+            .resampling_request_channel
+            .clone()
+            .ok_or(anyhow::Error::msg("Sample requesting channel is None."))?
+            .send((None, count))?)
     }
 }
 

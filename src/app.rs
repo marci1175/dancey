@@ -7,7 +7,12 @@ use egui::{
     Sense, Slider, Stroke,
 };
 use egui_toast::{Toast, Toasts};
-use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
+use rodio::{
+    buffer::SamplesBuffer,
+    queue::queue,
+    source::{Buffered, UniformSourceIterator},
+    OutputStream, OutputStreamHandle, Sink,
+};
 
 use derive_more::derive::Debug;
 use tokio::{
@@ -113,6 +118,10 @@ impl Application {
         }
 
         Default::default()
+    }
+
+    pub fn playback_thread_sender(&self) -> Option<&Sender<PlaybackControl>> {
+        self.playback_thread_sender.as_ref()
     }
 }
 
@@ -259,14 +268,18 @@ impl App for Application {
                         let (sender, mut receiver) = channel::<PlaybackControl>(200);
 
                         self.playback_thread_sender = Some(sender);
+                        
+                        let (sources_queue_controller, sources_queue) = queue::<f32>(true);
+                        
+                        sink_clone.append(sources_queue);
 
                         tokio::spawn(async move {
                             let starting_idx = playback_idx.fetch_add(sample_rate * AUDIO_BUFFER_SIZE_S * 2, std::sync::atomic::Ordering::Relaxed);
                             let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
 
                             let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, nodes.clone());
-                            
-                            sink_clone.append(SamplesBuffer::new(
+
+                            sources_queue_controller.append(SamplesBuffer::new(
                                 2,
                                 sample_rate as u32,
                                 samples.clone(),
@@ -279,18 +292,19 @@ impl App for Application {
                                     _ = tokio::time::sleep(Duration::from_secs_f32(AUDIO_BUFFER_SIZE_S as f32)) => {
                                         if should_playback {
                                             let starting_idx = playback_idx.fetch_add(sample_rate * AUDIO_BUFFER_SIZE_S * 2, std::sync::atomic::Ordering::Relaxed);
+
                                             let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
 
                                             let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, nodes.clone());
                         
-                                            sink_clone.append(SamplesBuffer::new(
+                                            sources_queue_controller.append(SamplesBuffer::new(
                                                 2,
                                                 sample_rate as u32,
                                                 samples.clone(),
                                             ));
                                         }
                                     },
-
+                                    
                                     Some(seek_control) = receiver.recv() => {
                                         match seek_control {
                                             PlaybackControl::Pause => {
@@ -480,9 +494,9 @@ impl App for Application {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.music_grid.show(ui);
+            let music_grid = self.music_grid.show(ui);
 
-            if let Some(sink) = &self.master_audio_sink {
+            if let Some(_sink) = &self.master_audio_sink {
                 let beat_dur = 60. / (self.music_grid.beat_per_minute) as f32;
 
                 if let Some(playback_timer) = &self.playback_timer {
@@ -505,13 +519,67 @@ impl App for Application {
                         vec2(0., 0.)
                     };
 
-                    ui.painter().line(
+                    let indicator_points = vec![
+                        Pos2::new(x - delta_pos.x, self.music_grid.grid_rect.top()),
+                        Pos2::new(x - delta_pos.x, self.music_grid.grid_rect.bottom()),
+                    ];
+
+                    let indicator_rect = Rect::from_points(&indicator_points);
+
+                    let indicator_interaction = ui.interact(
+                        indicator_rect.expand2(vec2(20., 0.)),
+                        "indicator_interact".into(),
+                        Sense::click_and_drag(),
+                    );
+
+                    let indicator_pos = if indicator_interaction.dragged() {
+                        let pointer_pos = ctx.pointer_latest_pos().unwrap();
+
+                        vec![
+                            Pos2::new(
+                                pointer_pos.x.max(self.music_grid.grid_rect.left()),
+                                self.music_grid.grid_rect.top(),
+                            ),
+                            Pos2::new(
+                                pointer_pos.x.max(self.music_grid.grid_rect.left()),
+                                self.music_grid.grid_rect.bottom(),
+                            ),
+                        ]
+                    } else {
                         vec![
                             Pos2::new(x - delta_pos.x, self.music_grid.grid_rect.top()),
                             Pos2::new(x - delta_pos.x, self.music_grid.grid_rect.bottom()),
-                        ],
-                        Stroke::new(2., Color32::WHITE),
-                    );
+                        ]
+                    };
+
+                    if indicator_interaction.drag_stopped() {
+                        let pointer_pos = ctx.pointer_latest_pos().unwrap();
+
+                        let grid_pointer_pos = pointer_pos.x - music_grid.rect.left()
+                            + self.music_grid.inner_state.as_ref().unwrap().state.offset.x;
+
+                        let grid_pointer_node =
+                            grid_pointer_pos / self.music_grid.get_grid_node_width();
+
+                        let samples_per_beat = (self.music_grid.sample_rate as usize
+                            * self.music_grid.beat_per_minute)
+                            as f32
+                            / 60.;
+
+                        let pointing_at_nth_sample = grid_pointer_node * samples_per_beat;
+
+                        //Handle the new position
+                        if let Some(sender) = &self.playback_thread_sender {
+                            sender
+                                .try_send(PlaybackControl::Seek(
+                                    pointing_at_nth_sample.ceil() as usize
+                                ))
+                                .unwrap();
+                        };
+                    }
+
+                    ui.painter()
+                        .line(indicator_pos, Stroke::new(2., Color32::WHITE));
                 }
             }
 
