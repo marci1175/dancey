@@ -8,7 +8,8 @@ use dashmap::DashMap;
 use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
-use rodio::{OutputStream, OutputStreamHandle, Sink};
+use ringbuf::{storage::Heap, traits::{Consumer, Observer, Producer, Split}, wrap::caching::Caching, SharedRb};
+use rodio::{OutputStream, OutputStreamHandle, Sample, Sink, Source};
 use rubato::Resampler;
 use symphonia::core::{
     audio::{AudioBuffer, Signal},
@@ -120,7 +121,7 @@ impl SoundNode {
 
                         // Create a handle to the master buffer.
                         let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
-
+                        
                         // First we decode the very first packet, to get information about one packet
                         let decoded_packet_sample_count = decoder
                             .decode(&Packet::new_from_boxed_slice(
@@ -1048,7 +1049,7 @@ impl MusicGrid {
                 let chunks = buffer_part_read.chunks_exact(32);
 
                 for (idx, (buffer_chunk, node_sample_chunk)) in chunks
-                    .zip(node.samples_buffer.get_inner().chunks_exact(32))
+                    .zip(node.samples_buffer.get_inner().drain(..).as_slice().chunks_exact(32))
                     .enumerate()
                 {
                     let add_result = f32x32::load_or_default(buffer_chunk)
@@ -1195,7 +1196,7 @@ impl MusicGrid {
                 let chunks = buffer_part_read.chunks_exact(32);
 
                 for (idx, (buffer_chunk, node_sample_chunk)) in chunks
-                    .zip(node.samples_buffer.get_inner().chunks_exact(32))
+                    .zip(node.samples_buffer.get_inner().drain(..).as_slice().chunks_exact(32))
                     .enumerate()
                 {
                     let mut result_list: Vec<f32> = Vec::with_capacity(32);

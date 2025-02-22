@@ -8,10 +8,7 @@ use egui::{
 };
 use egui_toast::{Toast, Toasts};
 use rodio::{
-    buffer::SamplesBuffer,
-    queue::queue,
-    source::{Buffered, UniformSourceIterator},
-    OutputStream, OutputStreamHandle, Sink,
+    buffer::SamplesBuffer, queue::{self, queue, SourcesQueueOutput}, OutputStream, OutputStreamHandle, Sink
 };
 
 use derive_more::derive::Debug;
@@ -264,14 +261,14 @@ impl App for Application {
                         let sample_rate = self.music_grid.sample_rate as usize;
                         let nodes = self.music_grid.nodes.clone();
                         let sink_clone = sink.clone();
-
+                        
                         let (sender, mut receiver) = channel::<PlaybackControl>(200);
 
                         self.playback_thread_sender = Some(sender);
+
+                        let (sources_queue_input, sources_queue_controller) = queue(true);
                         
-                        let (sources_queue_controller, sources_queue) = queue::<f32>(true);
-                        
-                        sink_clone.append(sources_queue);
+                        sink_clone.append(sources_queue_controller);
 
                         tokio::spawn(async move {
                             let starting_idx = playback_idx.fetch_add(sample_rate * AUDIO_BUFFER_SIZE_S * 2, std::sync::atomic::Ordering::Relaxed);
@@ -279,25 +276,25 @@ impl App for Application {
 
                             let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, nodes.clone());
 
-                            sources_queue_controller.append(SamplesBuffer::new(
+                            sources_queue_input.append(SamplesBuffer::new(
                                 2,
                                 sample_rate as u32,
                                 samples.clone(),
                             ));
 
                             let mut should_playback = true;
-
+                            
                             loop {
                                 select! {
-                                    _ = tokio::time::sleep(Duration::from_secs_f32(AUDIO_BUFFER_SIZE_S as f32)) => {
+                                    _ = tokio::time::sleep(Duration::from_secs_f32(AUDIO_BUFFER_SIZE_S as f32 - 0.2)) => {
                                         if should_playback {
                                             let starting_idx = playback_idx.fetch_add(sample_rate * AUDIO_BUFFER_SIZE_S * 2, std::sync::atomic::Ordering::Relaxed);
 
                                             let dest_idx = playback_idx.load(std::sync::atomic::Ordering::Relaxed);
 
                                             let samples = MusicGrid::buffer_preview_samples_simd(starting_idx, dest_idx, sample_rate, nodes.clone());
-                        
-                                            sources_queue_controller.append(SamplesBuffer::new(
+                                            
+                                            sources_queue_input.append(SamplesBuffer::new(
                                                 2,
                                                 sample_rate as u32,
                                                 samples.clone(),
