@@ -9,7 +9,6 @@ use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 use ringbuf::{
-    
     storage::Heap,
     traits::{Consumer, Observer, Producer, Split},
     wrap::caching::Caching,
