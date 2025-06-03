@@ -8,7 +8,9 @@ use egui::{
 };
 use egui_toast::{Toast, Toasts};
 use rodio::{
-    buffer::SamplesBuffer, queue::{self, queue, SourcesQueueOutput}, OutputStream, OutputStreamHandle, Sink
+    buffer::SamplesBuffer,
+    queue::queue,
+    OutputStream, OutputStreamHandle, Sink,
 };
 
 use derive_more::derive::Debug;

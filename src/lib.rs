@@ -8,7 +8,12 @@ use dashmap::DashMap;
 use egui::{vec2, Align2, Color32, FontId, Label, Pos2, RichText, ScrollArea, Vec2};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
-use ringbuf::{storage::Heap, traits::{Consumer, Observer, Producer, Split}, wrap::caching::Caching, SharedRb};
+use ringbuf::{
+    storage::Heap,
+    traits::{Consumer, Observer, Producer, Split},
+    wrap::caching::Caching,
+    SharedRb,
+};
 use rodio::{OutputStream, OutputStreamHandle, Sample, Sink, Source};
 use rubato::Resampler;
 use symphonia::core::{
@@ -82,7 +87,7 @@ impl SoundNode {
         let track_sample_rate = track_params.sample_rate.unwrap();
 
         let samples_buffer_handle =
-            SampleBuffer::new(sample_rate * 2, (sample_rate as f64 * duration) as usize);
+            SampleBuffer::new(sample_rate * 2, (sample_rate as f64 * duration) as usize * 2);
 
         let samples_buffer_handle_clone = samples_buffer_handle.clone();
 
@@ -108,6 +113,9 @@ impl SoundNode {
         // Create sample parsing thread
         std::thread::spawn(move || {
             // Constanly wait for an incoming sample parsing message.
+            // Allocate both left and right channel buffers.
+            let mut left_buffer = vec![];
+            let mut right_buffer = vec![];
             loop {
                 match receiver.recv() {
                     Ok((destination, desired_decoded_sample_length)) => {
@@ -115,13 +123,9 @@ impl SoundNode {
                             return;
                         }
 
-                        // Allocate both left and right channel buffers.
-                        let mut left_buffer = vec![];
-                        let mut right_buffer = vec![];
-
                         // Create a handle to the master buffer.
                         let chunk_buffer = &mut *samples_buffer_handle_clone.get_inner();
-                        
+
                         // First we decode the very first packet, to get information about one packet
                         let decoded_packet_sample_count = decoder
                             .decode(&Packet::new_from_boxed_slice(
@@ -176,6 +180,8 @@ impl SoundNode {
                             right_buffer.extend(right.to_vec());
                         }
 
+                        let mut wave_out = resampler.output_buffer_allocate(true);
+
                         // Decode all of the packets we can right now
                         while left_buffer
                             .clone()
@@ -183,22 +189,23 @@ impl SoundNode {
                             .is_some()
                         {
                             // Create a buffer from the left and right buffers
-                            let buffer = resampler
-                                .process(
-                                    &[
-                                        left_buffer
-                                            .drain(0..resampler.input_frames_next())
-                                            .collect::<Vec<f32>>(),
-                                        right_buffer
-                                            .drain(0..resampler.input_frames_next())
-                                            .collect::<Vec<f32>>(),
-                                    ],
-                                    None,
-                                )
-                                .unwrap();
+                            resampler
+                                .process_into_buffer(
+                                &[
+                                    left_buffer
+                                        .drain(0..resampler.input_frames_next())
+                                        .collect::<Vec<f32>>(),
+                                    right_buffer
+                                        .drain(0..resampler.input_frames_next())
+                                        .collect::<Vec<f32>>(),
+                                ],
+                                &mut wave_out,
+                                None,
+                            )
+                            .unwrap();
 
                             // Add the samples to the master buffer
-                            for channel in buffer.windows(2) {
+                            for channel in wave_out.windows(2) {
                                 for i in 0..channel[0].len() {
                                     chunk_buffer.push(channel[0][i]);
                                     chunk_buffer.push(channel[1][i]);
@@ -1049,7 +1056,13 @@ impl MusicGrid {
                 let chunks = buffer_part_read.chunks_exact(32);
 
                 for (idx, (buffer_chunk, node_sample_chunk)) in chunks
-                    .zip(node.samples_buffer.get_inner().drain(..).as_slice().chunks_exact(32))
+                    .zip(
+                        node.samples_buffer
+                            .get_inner()
+                            .drain(..)
+                            .as_slice()
+                            .chunks_exact(32),
+                    )
                     .enumerate()
                 {
                     let add_result = f32x32::load_or_default(buffer_chunk)
@@ -1196,7 +1209,13 @@ impl MusicGrid {
                 let chunks = buffer_part_read.chunks_exact(32);
 
                 for (idx, (buffer_chunk, node_sample_chunk)) in chunks
-                    .zip(node.samples_buffer.get_inner().drain(..).as_slice().chunks_exact(32))
+                    .zip(
+                        node.samples_buffer
+                            .get_inner()
+                            .drain(..)
+                            .as_slice()
+                            .chunks_exact(32),
+                    )
                     .enumerate()
                 {
                     let mut result_list: Vec<f32> = Vec::with_capacity(32);
