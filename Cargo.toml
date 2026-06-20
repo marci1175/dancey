@@ -4,30 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.95"
+anyhow = "1.0.102"
 derive_more = { version = "1.0.0", features = ["debug"] }
 eframe = {version = "0.30.0", features = ["persistence"]}
 egui = "0.30.0"
 egui_extras = {version = "0.30.0", features = ["all_loaders"]}
-rfd = "0.15.2"
+rfd = "0.17.2"
 rodio = {version = "0.20.1", features = ["symphonia-all"]}
-serde = "1.0.217"
-parking_lot = {version = "0.12.3", features = ["serde"]}
-symphonia = {version = "0.5.4", features = ["all"]}
+serde = "1.0.228"
+parking_lot = { version = "0.12.5", features = ["serde"] }
+symphonia = {version = "0.6.0", features = ["all"]}
 egui-toast = "0.16.0"
 itertools = "0.14.0"
-rubato = "0.16.1"
+rubato = "3.0.0"
 criterion = "0.5.1"
 fon = "0.6.0"
-indexmap = {version = "2.7.1", features = ["serde"]}
-tokio = { version = "1.43.0", features = ["full"] }
-chrono = "0.4.39"
-dashmap = {version = "6.1.0", features = ["serde"]}
-ringbuf = "0.4.7"
-
-[[bench]]
-name = "benchmark"
-harness = false
-
-[profile.release]
-opt-level = "z"  # Optimize for size.
+indexmap = {version = "2.14.0", features = ["serde"]}
+tokio = { version = "1.52.3", features = ["full"] }
+chrono = "0.4.45"
+dashmap = {version = "6.2.1", features = ["serde"]}
