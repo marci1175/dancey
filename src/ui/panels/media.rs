@@ -51,17 +51,13 @@ pub struct MediaPanel {
     pub filesystem_selector_state: FileSystemSelector,
 }
 
-/// Display the media picker in the ui
+/// Display a detachable panel in a pre-determined position.
 pub fn display_panel<T: Send + Sync + 'static + Clone>(
     this: &Panel,
     ui: &mut Ui,
     state: T,
     title: &'static str,
-    display_ui: impl FnOnce(&Panel, &mut Ui, T)
-        + std::marker::Send
-        + std::marker::Sync
-        + 'static
-        + Copy,
+    display_ui: impl FnOnce(&Panel, &mut Ui, T) + std::marker::Send + std::marker::Sync + 'static + Copy,
 ) -> Option<InnerResponse<()>> {
     // Allocate the sidepanel for the panel
     // Match the detached panel's state
@@ -97,14 +93,54 @@ pub fn display_panel<T: Send + Sync + 'static + Clone>(
             None
         }
         false => Some({
-            // Allocate sidepanel in the root ui
-            egui::Panel::left(Id::new(this.id.discriminant())).show_inside(ui, |ui| {
-                // Display the title of the panel
-                display_panel_title(this, ui, title);
+            // Allocate the area in the root ui based on the type
+            match this.panel_type {
+                super::lib::PanelType::Central => {
+                    egui::CentralPanel::default_margins().show_inside(ui, |ui| {
+                        // Display the title of the panel
+                        display_panel_title(this, ui, title);
 
-                // Display ui of the panel
-                (display_ui)(this, ui, state)
-            })
+                        // Display ui of the panel
+                        (display_ui)(this, ui, state)
+                    })
+                }
+                super::lib::PanelType::Left => {
+                    egui::Panel::left(Id::new(this.id.discriminant())).show_inside(ui, |ui| {
+                        // Display the title of the panel
+                        display_panel_title(this, ui, title);
+
+                        // Display ui of the panel
+                        (display_ui)(this, ui, state)
+                    })
+                }
+                super::lib::PanelType::Right => {
+                    egui::Panel::right(Id::new(this.id.discriminant())).show_inside(ui, |ui| {
+                        // Display the title of the panel
+                        display_panel_title(this, ui, title);
+
+                        // Display ui of the panel
+                        (display_ui)(this, ui, state)
+                    })
+                }
+                super::lib::PanelType::Top => {
+                    egui::Panel::top(Id::new(this.id.discriminant())).show_inside(ui, |ui| {
+                        // Display the title of the panel
+                        display_panel_title(this, ui, title);
+
+                        // Display ui of the panel
+                        (display_ui)(this, ui, state)
+                    })
+                }
+                super::lib::PanelType::Bottom => {
+                    egui::Panel::bottom(Id::new(this.id.discriminant())).show_inside(ui, |ui| {
+                        // Display the title of the panel
+                        display_panel_title(this, ui, title);
+
+                        // Display ui of the panel
+                        (display_ui)(this, ui, state)
+                    })
+                }
+            }
         }),
     }
 }

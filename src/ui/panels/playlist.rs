@@ -5,5 +5,4 @@ use parking_lot::RwLock;
 
 use crate::ui::panels::lib::Panel;
 
-pub fn playlist_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<String>>) {
-}
+pub fn playlist_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<String>>) {}

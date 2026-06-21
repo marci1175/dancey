@@ -35,9 +35,23 @@ impl App for Application {
     fn update(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {}
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        for panel in self.panels.iter() {
-            panel.display(ui);
+        // Create the main options bar
+        egui::Panel::top("application_options").show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.menu_button("File", |ui| {});
+                ui.menu_button("View", |ui| {});
+                ui.menu_button("Plugins", |ui| {});
+                ui.menu_button("Help", |ui| {});
+                ui.menu_button("About", |ui| {});
+            });
+        });
 
+        // Draw detachable panels
+        for panel in self.panels.iter() {
+            // Draw/update panel
+            panel.display(ui);
+            
+            // If the panel is not detached we can display its toasts in the root ui
             if !panel.detached.load(std::sync::atomic::Ordering::Relaxed) {
                 panel.toasts.lock().show(ui);
             }

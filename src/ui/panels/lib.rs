@@ -8,7 +8,10 @@ use egui_toast::{Toast, ToastOptions, ToastStyle, Toasts};
 use indexmap::IndexSet;
 use parking_lot::{Mutex, RwLock};
 
-use crate::ui::panels::{media::{FileSystemSelector, MediaPanel, display_panel, mediapicker_ui}, playlist::playlist_ui};
+use crate::ui::panels::{
+    media::{display_panel, mediapicker_ui, FileSystemSelector, MediaPanel},
+    playlist::playlist_ui,
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, strum::EnumDiscriminants)]
 #[strum_discriminants(derive(Hash))]
@@ -21,8 +24,17 @@ pub enum PanelId {
     Media(Arc<RwLock<MediaPanel>>),
 
     /// Playlist
-    /// This is where we assemble the music from the clips 
-    Playlist
+    /// This is where we assemble the music from the clips
+    Playlist,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+pub enum PanelType {
+    Central,
+    Left,
+    Right,
+    Top,
+    Bottom,
 }
 
 /// A dedicated portion of the ui.
@@ -45,70 +57,122 @@ pub struct Panel {
     #[serde(skip)]
     /// Viewport settings for the detached window.
     pub viewport_settings: ViewportBuilder,
+
+    pub panel_type: PanelType,
 }
 
 impl Panel {
     pub fn display(&self, ui: &mut Ui) {
         match &self.id {
             PanelId::Root => todo!(),
-            PanelId::Media(state) => display_panel(self, ui, state.clone(), "Media Picker", mediapicker_ui),
-            PanelId::Playlist => display_panel(self, ui, Arc::new(RwLock::new(String::new())), "Media Picker", playlist_ui),
+            PanelId::Media(state) => {
+                display_panel(self, ui, state.clone(), "Media Picker", mediapicker_ui)
+            }
+            PanelId::Playlist => display_panel(
+                self,
+                ui,
+                Arc::new(RwLock::new(String::new())),
+                "Playlist",
+                playlist_ui,
+            ),
         };
     }
 }
 
 impl Panel {
-    pub fn new(id: PanelId, viewport_settings: ViewportBuilder) -> Self {
+    pub fn new(id: PanelId, viewport_settings: ViewportBuilder, ty: PanelType) -> Self {
         Self {
             id,
             detached: Arc::new(AtomicBool::new(false)),
             toasts: Arc::new(Mutex::new(Toasts::new().direction(Direction::TopDown))),
             viewport_settings,
+            panel_type: ty,
         }
     }
 }
 
 /// This function creates the default state of the panels
 pub fn create_panels() -> Vec<Panel> {
-    vec![Panel::new(
-        PanelId::Media(Arc::new(RwLock::new(MediaPanel {
-            media_selector_state: crate::ui::panels::media::MediaSelectorState::Bookmarks,
-            bookmarks: IndexSet::new(),
-            filesystem_selector_state: FileSystemSelector::default(),
-        }))),
-        ViewportBuilder {
-            title: Some(String::from("Media")),
-            app_id: None,
-            position: None,
-            inner_size: None,
-            min_inner_size: None,
-            max_inner_size: None,
-            clamp_size_to_monitor_size: None,
-            fullscreen: None,
-            maximized: None,
-            resizable: Some(true),
-            transparent: Some(false),
-            decorations: Some(true),
-            icon: None,
-            active: Some(true),
-            visible: Some(true),
-            fullsize_content_view: None,
-            title_shown: Some(false),
-            titlebar_buttons_shown: Some(false),
-            titlebar_shown: Some(false),
-            drag_and_drop: Some(false),
-            taskbar: Some(false),
-            close_button: Some(false),
-            minimize_button: Some(true),
-            maximize_button: Some(true),
-            window_level: Some(egui::WindowLevel::Normal),
-            mouse_passthrough: None,
-            window_type: Some(egui::X11WindowType::Normal),
-            movable_by_window_background: None,
-            has_shadow: None,
-            override_redirect: None,
-        },
-    )]
+    vec![
+        // Media picker
+        Panel::new(
+            PanelId::Media(Arc::new(RwLock::new(MediaPanel {
+                media_selector_state: crate::ui::panels::media::MediaSelectorState::Bookmarks,
+                bookmarks: IndexSet::new(),
+                filesystem_selector_state: FileSystemSelector::default(),
+            }))),
+            ViewportBuilder {
+                title: Some(String::from("Media")),
+                app_id: None,
+                position: None,
+                inner_size: None,
+                min_inner_size: None,
+                max_inner_size: None,
+                clamp_size_to_monitor_size: None,
+                fullscreen: None,
+                maximized: None,
+                resizable: Some(true),
+                transparent: Some(false),
+                decorations: Some(true),
+                icon: None,
+                active: Some(true),
+                visible: Some(true),
+                fullsize_content_view: None,
+                title_shown: Some(false),
+                titlebar_buttons_shown: Some(false),
+                titlebar_shown: Some(false),
+                drag_and_drop: Some(false),
+                taskbar: Some(false),
+                close_button: Some(false),
+                minimize_button: Some(true),
+                maximize_button: Some(true),
+                window_level: Some(egui::WindowLevel::Normal),
+                mouse_passthrough: None,
+                window_type: Some(egui::X11WindowType::Normal),
+                movable_by_window_background: None,
+                has_shadow: None,
+                override_redirect: None,
+            },
+            PanelType::Left,
+        ),
+        // Playlist
+        Panel::new(
+            PanelId::Playlist,
+            ViewportBuilder {
+                title: Some(String::from("Playlist")),
+                app_id: None,
+                position: None,
+                inner_size: None,
+                min_inner_size: None,
+                max_inner_size: None,
+                clamp_size_to_monitor_size: None,
+                fullscreen: None,
+                maximized: None,
+                resizable: Some(true),
+                transparent: Some(false),
+                decorations: Some(true),
+                icon: None,
+                active: Some(true),
+                visible: Some(true),
+                fullsize_content_view: None,
+                title_shown: Some(false),
+                titlebar_buttons_shown: Some(false),
+                titlebar_shown: Some(false),
+                drag_and_drop: Some(false),
+                taskbar: Some(false),
+                close_button: Some(false),
+                minimize_button: Some(true),
+                maximize_button: Some(true),
+                window_level: Some(egui::WindowLevel::AlwaysOnTop),
+                mouse_passthrough: None,
+                window_type: Some(egui::X11WindowType::Normal),
+                movable_by_window_background: None,
+                has_shadow: None,
+                override_redirect: None,
+            },
+            PanelType::Central,
+        ),
+    ]
 }
 
 pub fn display_panel_title(this: &Panel, ui: &mut Ui, title: &str) {
