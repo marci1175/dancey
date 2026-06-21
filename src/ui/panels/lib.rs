@@ -9,8 +9,8 @@ use indexmap::IndexSet;
 use parking_lot::{Mutex, RwLock};
 
 use crate::ui::panels::{
-    media::{display_panel, mediapicker_ui, FileSystemSelector, MediaPanel},
-    playlist::playlist_ui,
+    media::{FileSystemSelector, MediaPanel, display_panel, mediapicker_ui},
+    playlist::{PlaylistState, playlist_ui},
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, strum::EnumDiscriminants)]
@@ -25,7 +25,7 @@ pub enum PanelId {
 
     /// Playlist
     /// This is where we assemble the music from the clips
-    Playlist,
+    Playlist(Arc<RwLock<PlaylistState>>),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
@@ -68,10 +68,10 @@ impl Panel {
             PanelId::Media(state) => {
                 display_panel(self, ui, state.clone(), "Media Picker", mediapicker_ui)
             }
-            PanelId::Playlist => display_panel(
+            PanelId::Playlist(state) => display_panel(
                 self,
                 ui,
-                Arc::new(RwLock::new(String::new())),
+                state.clone(),
                 "Playlist",
                 playlist_ui,
             ),
@@ -137,7 +137,10 @@ pub fn create_panels() -> Vec<Panel> {
         ),
         // Playlist
         Panel::new(
-            PanelId::Playlist,
+            PanelId::Playlist(Arc::new(RwLock::new(PlaylistState {
+                bpm: 120.0,
+                cursor_offset: 0.0,
+            }))),
             ViewportBuilder {
                 title: Some(String::from("Playlist")),
                 app_id: None,
