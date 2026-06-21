@@ -6,20 +6,18 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.102"
 derive_more = { version = "1.0.0", features = ["debug"] }
-eframe = {version = "0.30.0", features = ["persistence"]}
-egui = "0.30.0"
-egui_extras = {version = "0.30.0", features = ["all_loaders"]}
+eframe = {version = "0.34.3", features = ["persistence"]}
+egui = "0.34.3"
 rfd = "0.17.2"
-rodio = {version = "0.20.1", features = ["symphonia-all"]}
+rodio = {version = "0.22.2", features = ["symphonia-all"]}
 serde = "1.0.228"
 parking_lot = { version = "0.12.5", features = ["serde"] }
 symphonia = {version = "0.6.0", features = ["all"]}
-egui-toast = "0.16.0"
-itertools = "0.14.0"
+egui-toast = "0.20.0"
 rubato = "3.0.0"
-criterion = "0.5.1"
 fon = "0.6.0"
 indexmap = {version = "2.14.0", features = ["serde"]}
 tokio = { version = "1.52.3", features = ["full"] }
-chrono = "0.4.45"
+chrono =  {version = "0.4.45", features = ["serde"]}
 dashmap = {version = "6.2.1", features = ["serde"]}
+strum = { version = "0.28.0", features = ["derive"] }

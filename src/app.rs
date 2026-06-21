@@ -1,9 +1,8 @@
 use eframe::{App, CreationContext};
-use egui::{CentralPanel, ViewportBuilder, ViewportId};
 
-use crate::ui::panels::lib::{create_panels, Panel, PanelId};
+use crate::ui::panels::lib::{create_panels, Panel};
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Application {
     panels: Vec<Panel>,
@@ -33,9 +32,15 @@ impl App for Application {
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        for panel in self.panels.iter_mut() {
-            panel.display(ctx);
+    fn update(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {}
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        for panel in self.panels.iter() {
+            panel.display(ui);
+
+            if !panel.detached.load(std::sync::atomic::Ordering::Relaxed) {
+                panel.toasts.lock().show(ui);
+            }
         }
     }
 }

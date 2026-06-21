@@ -1,7 +1,7 @@
-use egui::{Context, InnerResponse};
+use egui::{InnerResponse, Ui};
 
 use crate::ui::panels::lib::Panel;
 
-pub fn display_root(this: &mut Panel, ctx: &Context) -> Option<InnerResponse<()>> {
+pub fn display_root(_this: &Panel, _ui: &mut Ui) -> anyhow::Result<Option<InnerResponse<()>>> {
     panic!()
 }
