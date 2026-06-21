@@ -3,15 +3,12 @@ use std::{
     time::Duration,
 };
 
-use egui::{Direction, InnerResponse, Ui, ViewportBuilder, ViewportId};
+use egui::{Direction, Ui, ViewportBuilder, ViewportId};
 use egui_toast::{Toast, ToastOptions, ToastStyle, Toasts};
-use indexmap::IndexMap;
+use indexmap::IndexSet;
 use parking_lot::{Mutex, RwLock};
 
-use crate::ui::panels::{
-    media::{display_media, FileSystemSelector, MediaPanel},
-    root::display_root,
-};
+use crate::ui::panels::{media::{FileSystemSelector, MediaPanel, display_panel, mediapicker_ui}, playlist::playlist_ui};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, strum::EnumDiscriminants)]
 #[strum_discriminants(derive(Hash))]
@@ -22,6 +19,10 @@ pub enum PanelId {
 
     /// Media selector
     Media(Arc<RwLock<MediaPanel>>),
+
+    /// Playlist
+    /// This is where we assemble the music from the clips 
+    Playlist
 }
 
 /// A dedicated portion of the ui.
@@ -49,8 +50,9 @@ pub struct Panel {
 impl Panel {
     pub fn display(&self, ui: &mut Ui) {
         match &self.id {
-            PanelId::Root => display_root(self, ui),
-            PanelId::Media(state) => display_media(self, ui, state.clone()),
+            PanelId::Root => todo!(),
+            PanelId::Media(state) => display_panel(self, ui, state.clone(), "Media Picker", mediapicker_ui),
+            PanelId::Playlist => display_panel(self, ui, Arc::new(RwLock::new(String::new())), "Media Picker", playlist_ui),
         };
     }
 }
@@ -71,7 +73,7 @@ pub fn create_panels() -> Vec<Panel> {
     vec![Panel::new(
         PanelId::Media(Arc::new(RwLock::new(MediaPanel {
             media_selector_state: crate::ui::panels::media::MediaSelectorState::Bookmarks,
-            bookmarks: IndexMap::new(),
+            bookmarks: IndexSet::new(),
             filesystem_selector_state: FileSystemSelector::default(),
         }))),
         ViewportBuilder {

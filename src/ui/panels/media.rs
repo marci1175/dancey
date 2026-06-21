@@ -1,9 +1,12 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{ffi::OsStr, path::PathBuf, sync::Arc};
 
 use chrono::Utc;
-use egui::{CentralPanel, Color32, Id, InnerResponse, RichText, Ui, UiBuilder, ViewportId};
-use egui_toast::{Toast, ToastStyle};
-use indexmap::IndexMap;
+use egui::{
+    CentralPanel, Color32, Id, InnerResponse, RichText, ScrollArea, Sense, Ui, UiBuilder,
+    ViewportId,
+};
+use egui_toast::ToastStyle;
+use indexmap::IndexSet;
 use parking_lot::RwLock;
 use strum::IntoDiscriminant;
 
@@ -15,7 +18,7 @@ use crate::{
     ui::panels::lib::{display_error_as_toast, display_panel_title, Panel},
 };
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub struct BookmarkedObject {
     /// Timestamp of when it was saved
     timestamp: chrono::DateTime<Utc>,
@@ -42,18 +45,24 @@ pub struct MediaPanel {
 
     /// Bookmarks saved by the user
     /// We want to save order between the entries
-    pub bookmarks: IndexMap<String, BookmarkedObject>,
+    pub bookmarks: IndexSet<BookmarkedObject>,
 
     /// The state of the FilesystemSelector
     pub filesystem_selector_state: FileSystemSelector,
 }
 
 /// Display the media picker in the ui
-pub fn display_media(
+pub fn display_panel<T: Send + Sync + 'static + Clone>(
     this: &Panel,
     ui: &mut Ui,
-    state: Arc<RwLock<MediaPanel>>,
-) -> anyhow::Result<Option<InnerResponse<()>>> {
+    state: T,
+    title: &'static str,
+    display_ui: impl FnOnce(&Panel, &mut Ui, T)
+        + std::marker::Send
+        + std::marker::Sync
+        + 'static
+        + Copy,
+) -> Option<InnerResponse<()>> {
     // Allocate the sidepanel for the panel
     // Match the detached panel's state
     match this.detached.load(std::sync::atomic::Ordering::Relaxed) {
@@ -76,8 +85,8 @@ pub fn display_media(
 
                     CentralPanel::default().show_inside(ui, |ui| {
                         // Display the title of the panel
-                        display_panel_title(&this, ui, "Media Picker");
-                        display_ui(&this, ui, state);
+                        display_panel_title(&this, ui, title);
+                        (display_ui)(&this, ui, state);
 
                         // Display toasts added to child window
                         toasts.lock().show(ui);
@@ -85,18 +94,18 @@ pub fn display_media(
                 },
             );
 
-            Ok(None)
+            None
         }
-        false => Ok(Some({
+        false => Some({
             // Allocate sidepanel in the root ui
             egui::Panel::left(Id::new(this.id.discriminant())).show_inside(ui, |ui| {
                 // Display the title of the panel
-                display_panel_title(this, ui, "Media Picker");
+                display_panel_title(this, ui, title);
 
                 // Display ui of the panel
-                display_ui(this, ui, state)
+                (display_ui)(this, ui, state)
             })
-        })),
+        }),
     }
 }
 
@@ -107,7 +116,7 @@ pub enum MediaSelectorState {
 }
 
 /// This is what gets called when the panel is either attached or detached
-fn display_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>) {
+pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>) {
     let current_state = state.read().clone();
 
     // Decide width of both objects
@@ -190,7 +199,16 @@ fn display_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>) {
                         if ui
                             .add_sized([width, 20.0], egui::Button::new("★"))
                             .clicked()
-                        {};
+                        {
+                            state.write().bookmarks.insert(BookmarkedObject {
+                                timestamp: chrono::Utc::now(),
+                                // Its safe to unwrap here since we disable the ui if this is None.
+                                path: current_state
+                                    .filesystem_selector_state
+                                    .selected_object
+                                    .unwrap(),
+                            });
+                        };
                     },
                 );
 
@@ -234,7 +252,31 @@ fn display_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>) {
         |ui| {
             // Handle both states of the mediaselector
             match current_state.media_selector_state {
-                MediaSelectorState::Bookmarks => {}
+                MediaSelectorState::Bookmarks => {
+                    for bookmark in current_state.bookmarks {
+                        let entry = ui
+                            .scope(|ui| {
+                                ui.style_mut().interaction.selectable_labels = false;
+
+                                ui.label(
+                                    RichText::from(
+                                        bookmark
+                                            .path
+                                            .file_name()
+                                            .unwrap_or(OsStr::new("[Unable to acquire file name]"))
+                                            .to_string_lossy(),
+                                    )
+                                    .strong(),
+                                )
+                                .interact(Sense::click_and_drag())
+                            })
+                            .inner;
+
+                        entry.context_menu(|ui| {
+                            ui.label(RichText::from(bookmark.path.to_string_lossy()).weak());
+                        });
+                    }
+                }
                 // Draw file system selector
                 MediaSelectorState::FileSystem => {
                     ui.separator();
@@ -256,11 +298,15 @@ fn display_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>) {
                     let file_system_selector = &mut state.write().filesystem_selector_state;
 
                     // Display the mapped folder
-                    display_filesystem_map(
-                        &mut file_system_selector.current_folder,
-                        ui,
-                        &mut file_system_selector.selected_object,
-                    );
+                    ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            display_filesystem_map(
+                                &mut file_system_selector.current_folder,
+                                ui,
+                                &mut file_system_selector.selected_object,
+                            );
+                        });
                 }
             }
         },
@@ -272,29 +318,45 @@ fn display_filesystem_map(map: &mut FsMap, ui: &mut Ui, selected_object: &mut Op
     for entry in &mut map.objects {
         match entry {
             crate::internals::fs::FsObject::File { name, path } => {
+                // Create an entry where the users cannot copy the text from it directly
+                // Make this object draggable and the payload should the the path of the object we are referencing in the ui.
+                let entry = ui.dnd_drag_source(Id::new(&*path), path.clone(), |ui| {
+                    ui.scope(|ui| {
+                        // Set this so we cannot select text
+                        ui.style_mut().interaction.selectable_labels = false;
+
+                        // Display the actual label
+                        ui.label(RichText::from(name.to_string_lossy()).background_color({
+                            // Highlight the label if the user has clicked on it
+                            if *selected_object != Some(path.clone()) {
+                                Color32::TRANSPARENT
+                            } else {
+                                Color32::GRAY
+                            }
+                        }))
+                        .interact(Sense::click_and_drag())
+                    })
+                });
+
+                let click = ui.interact(
+                    entry.response.rect,
+                    Id::new(&*path).with("click"),
+                    Sense::click(),
+                );
+
                 // Sense if the label is being clicked on
-                if ui
-                    .label(RichText::from(name.to_string_lossy()).background_color({
-                        // Highlight the label if the user has clicked on it
-                        if *selected_object != Some(path.clone()) {
-                            Color32::BLACK
-                        } else {
-                            Color32::GRAY
-                        }
-                    }))
-                    .clicked()
-                {
+                if click.clicked() {
                     // Modify the selected object variable, if it has been re-selected reset the value.
                     if *selected_object != Some(path.clone()) {
                         *selected_object = Some(path.clone());
-                    }
-                    else {
+                    } else {
                         *selected_object = None;
                     }
                 };
             }
             crate::internals::fs::FsObject::Symlink(os_string) => {
-                ui.label(os_string.to_string_lossy());
+                ui.label(RichText::from(os_string.to_string_lossy()).weak())
+                    .on_hover_text("This file is a symlink.");
             }
             crate::internals::fs::FsObject::Folder {
                 name,
