@@ -1,16 +1,17 @@
 use std::{
+    collections::HashMap,
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
 };
 
-use egui::{Direction, Ui, ViewportBuilder, ViewportId};
+use egui::{Direction, Ui, Vec2, ViewportBuilder, ViewportId};
 use egui_toast::{Toast, ToastOptions, ToastStyle, Toasts};
 use indexmap::IndexSet;
 use parking_lot::{Mutex, RwLock};
 
 use crate::ui::panels::{
-    media::{FileSystemSelector, MediaPanel, display_panel, mediapicker_ui},
-    playlist::{PlaylistState, playlist_ui},
+    media::{display_panel, mediapicker_ui, FileSystemSelector, MediaPanel},
+    playlist::{playlist_ui, PlaylistState},
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, strum::EnumDiscriminants)]
@@ -68,13 +69,9 @@ impl Panel {
             PanelId::Media(state) => {
                 display_panel(self, ui, state.clone(), "Media Picker", mediapicker_ui)
             }
-            PanelId::Playlist(state) => display_panel(
-                self,
-                ui,
-                state.clone(),
-                "Playlist",
-                playlist_ui,
-            ),
+            PanelId::Playlist(state) => {
+                display_panel(self, ui, state.clone(), "Playlist", playlist_ui)
+            }
         };
     }
 }
@@ -140,6 +137,8 @@ pub fn create_panels() -> Vec<Panel> {
             PanelId::Playlist(Arc::new(RwLock::new(PlaylistState {
                 bpm: 120.0,
                 cursor_offset: 0.0,
+                grid_offset: Vec2::default(),
+                custom_tracks: HashMap::new(),
             }))),
             ViewportBuilder {
                 title: Some(String::from("Playlist")),

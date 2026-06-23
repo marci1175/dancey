@@ -50,7 +50,7 @@ impl App for Application {
         for panel in self.panels.iter() {
             // Draw/update panel
             panel.display(ui);
-            
+
             // If the panel is not detached we can display its toasts in the root ui
             if !panel.detached.load(std::sync::atomic::Ordering::Relaxed) {
                 panel.toasts.lock().show(ui);
