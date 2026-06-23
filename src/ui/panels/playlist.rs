@@ -1,3 +1,4 @@
+use core::simd;
 use std::{collections::HashMap, ops::Add, sync::Arc};
 
 use crate::ui::panels::lib::Panel;
@@ -121,7 +122,7 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
             Some(custom) => custom.clone(),
             None => TrackCustomization::named_default(label_text.clone()),
         };
-        
+
         let top = (y_coord + normalized_y_offset).max(playlist_rect.top());
         let bottom = (y_coord + normalized_y_offset + label_customization.height)
             .min(playlist_rect.bottom());

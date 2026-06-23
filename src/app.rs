@@ -1,6 +1,6 @@
 use eframe::{App, CreationContext};
 
-use crate::ui::panels::lib::{create_panels, Panel};
+use crate::ui::panels::lib::{Panel, create_panels};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]

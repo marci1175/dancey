@@ -898,6 +898,7 @@ dependencies = [
  "strum",
  "symphonia 0.6.0",
  "tokio",
+ "windows",
 ]
 
 [[package]]

@@ -28,6 +28,8 @@ pub enum PanelId {
     /// Playlist
     /// This is where we assemble the music from the clips
     Playlist(Arc<RwLock<PlaylistState>>),
+
+    PluginManager,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
@@ -73,6 +75,7 @@ impl Panel {
             PanelId::Playlist(state) => {
                 display_panel(self, ui, state.clone(), "Playlist", playlist_ui)
             }
+            PanelId::PluginManager => todo!(),
         };
     }
 }
