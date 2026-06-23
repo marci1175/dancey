@@ -1,21 +1,17 @@
 use std::{ffi::OsStr, path::PathBuf, sync::Arc};
 
 use chrono::Utc;
-use egui::{
-    CentralPanel, Color32, Id, InnerResponse, RichText, ScrollArea, Sense, Ui, UiBuilder,
-    ViewportId,
-};
+use egui::{Color32, Id, RichText, ScrollArea, Sense, Ui, UiBuilder};
 use egui_toast::ToastStyle;
 use indexmap::IndexSet;
 use parking_lot::RwLock;
-use strum::IntoDiscriminant;
 
 use crate::{
     internals::{
         fs::{create_entry_map, FsMap},
         utils::CacheState,
     },
-    ui::panels::lib::{display_error_as_toast, display_panel_title, Panel},
+    ui::panels::lib::{display_error_as_toast, Panel},
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
@@ -49,100 +45,6 @@ pub struct MediaPanel {
 
     /// The state of the FilesystemSelector
     pub filesystem_selector_state: FileSystemSelector,
-}
-
-/// Display a detachable panel in a pre-determined position.
-pub fn display_panel<T: Send + Sync + 'static + Clone>(
-    this: &Panel,
-    ui: &mut Ui,
-    state: T,
-    title: &'static str,
-    display_ui: impl FnOnce(&Panel, &mut Ui, T) + std::marker::Send + std::marker::Sync + 'static + Copy,
-) -> Option<InnerResponse<()>> {
-    // Allocate the sidepanel for the panel
-    // Match the detached panel's state
-    match this.detached.load(std::sync::atomic::Ordering::Relaxed) {
-        true => {
-            // Clone panel state so that it can be cloned into a child window
-            let this = this.clone();
-
-            // Create child window for the detached panel
-            ui.ctx().show_viewport_deferred(
-                ViewportId::from_hash_of(this.id.discriminant()),
-                this.viewport_settings.clone(),
-                move |ui, _viewport| {
-                    // Clone state here to that we can move it
-                    let state = state.clone();
-                    let toasts = this.toasts.clone();
-
-                    // I am not sure why this is not working when creating the panel and the viewport
-                    // If i uncomment this `ctx.request_repaint_of(ViewportId::ROOT);` wont work as intended
-                    // ctx.send_viewport_cmd(egui::ViewportCommand::Title(String::from("Media")));
-
-                    CentralPanel::default().show_inside(ui, |ui| {
-                        // Display the title of the panel
-                        display_panel_title(&this, ui, title);
-                        (display_ui)(&this, ui, state);
-
-                        // Display toasts added to child window
-                        toasts.lock().show(ui);
-                    });
-                },
-            );
-
-            None
-        }
-        false => Some({
-            // Allocate the area in the root ui based on the type
-            match this.panel_type {
-                super::lib::PanelType::Central => {
-                    egui::CentralPanel::default_margins().show_inside(ui, |ui| {
-                        // Display the title of the panel
-                        display_panel_title(this, ui, title);
-
-                        // Display ui of the panel
-                        (display_ui)(this, ui, state)
-                    })
-                }
-                super::lib::PanelType::Left => {
-                    egui::Panel::left(Id::new(this.id.discriminant())).show_inside(ui, |ui| {
-                        // Display the title of the panel
-                        display_panel_title(this, ui, title);
-
-                        // Display ui of the panel
-                        (display_ui)(this, ui, state)
-                    })
-                }
-                super::lib::PanelType::Right => {
-                    egui::Panel::right(Id::new(this.id.discriminant())).show_inside(ui, |ui| {
-                        // Display the title of the panel
-                        display_panel_title(this, ui, title);
-
-                        // Display ui of the panel
-                        (display_ui)(this, ui, state)
-                    })
-                }
-                super::lib::PanelType::Top => {
-                    egui::Panel::top(Id::new(this.id.discriminant())).show_inside(ui, |ui| {
-                        // Display the title of the panel
-                        display_panel_title(this, ui, title);
-
-                        // Display ui of the panel
-                        (display_ui)(this, ui, state)
-                    })
-                }
-                super::lib::PanelType::Bottom => {
-                    egui::Panel::bottom(Id::new(this.id.discriminant())).show_inside(ui, |ui| {
-                        // Display the title of the panel
-                        display_panel_title(this, ui, title);
-
-                        // Display ui of the panel
-                        (display_ui)(this, ui, state)
-                    })
-                }
-            }
-        }),
-    }
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
