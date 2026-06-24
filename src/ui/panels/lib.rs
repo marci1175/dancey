@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 
@@ -11,8 +11,8 @@ use parking_lot::{Mutex, RwLock};
 use strum::IntoDiscriminant;
 
 use crate::ui::panels::{
-    media::{mediapicker_ui, FileSystemSelector, MediaPanel},
-    playlist::{playlist_ui, PlaylistState},
+    media::{FileSystemSelector, MediaPanel, mediapicker_ui},
+    playlist::{PlaylistState, playlist_ui},
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, strum::EnumDiscriminants)]
@@ -30,6 +30,7 @@ pub enum PanelId {
     Playlist(Arc<RwLock<PlaylistState>>),
 
     PluginManager,
+    Mixer,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
@@ -68,7 +69,6 @@ pub struct Panel {
 impl Panel {
     pub fn display(&self, ui: &mut Ui) {
         match &self.id {
-            PanelId::Root => todo!(),
             PanelId::Media(state) => {
                 display_panel(self, ui, state.clone(), "Media Picker", mediapicker_ui)
             }
@@ -76,6 +76,8 @@ impl Panel {
                 display_panel(self, ui, state.clone(), "Playlist", playlist_ui)
             }
             PanelId::PluginManager => todo!(),
+            PanelId::Root => todo!(),
+            PanelId::Mixer => todo!(),
         };
     }
 }

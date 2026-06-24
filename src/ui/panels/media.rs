@@ -1,17 +1,21 @@
-use std::{ffi::OsStr, path::PathBuf, sync::Arc};
+use std::{ffi::OsStr, path::PathBuf, rc::Rc, sync::Arc};
 
 use chrono::Utc;
-use egui::{Color32, Id, RichText, ScrollArea, Sense, Ui, UiBuilder};
-use egui_toast::ToastStyle;
+use egui::{Color32, Context, Id, RichText, ScrollArea, Sense, Ui, UiBuilder};
+use egui_toast::{ToastStyle, Toasts};
 use indexmap::IndexSet;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::{
     internals::{
-        fs::{create_entry_map, FsMap},
-        utils::CacheState,
+        fs::{FsMap, create_entry_map},
+        sample::{SampleProperties, fetch_sample_properties},
+        utils::{CacheState, random_value},
     },
-    ui::panels::lib::{display_error_as_toast, Panel},
+    ui::panels::{
+        lib::{Panel, display_error_as_toast},
+        playlist::DNDSampleInstance,
+    },
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
@@ -27,10 +31,16 @@ pub struct BookmarkedObject {
 pub struct FileSystemSelector {
     /// The path to the folder we have opened
     pub opened_folder: Option<PathBuf>,
+
     /// The object selected in the media selector
     pub selected_object: Option<PathBuf>,
+
     /// Current folder that has been read
     pub current_folder: FsMap,
+
+    /// Currently dragged sample's properties
+    #[serde(skip)]
+    pub dragged_sample_props: SampleProperties,
 }
 
 /// State of the media selector panel.
@@ -82,7 +92,7 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>)
                 [width, 20.0],
                 egui::Button::selectable(
                     current_state.media_selector_state == MediaSelectorState::FileSystem,
-                    "FileSystem",
+                    "Files",
                 ),
             )
             .clicked()
@@ -243,6 +253,8 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>)
                                 &mut file_system_selector.current_folder,
                                 ui,
                                 &mut file_system_selector.selected_object,
+                                &mut file_system_selector.dragged_sample_props,
+                                this.toasts.clone(),
                             );
                         });
                 }
@@ -252,38 +264,57 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>)
 }
 
 /// Display the map of directory items.
-fn display_filesystem_map(map: &mut FsMap, ui: &mut Ui, selected_object: &mut Option<PathBuf>) {
+fn display_filesystem_map(
+    map: &mut FsMap,
+    ui: &mut Ui,
+    selected_object: &mut Option<PathBuf>,
+    dragged_sample_props: &mut SampleProperties,
+    toasts: Arc<Mutex<Toasts>>,
+) {
     for entry in &mut map.objects {
         match entry {
             crate::internals::fs::FsObject::File { name, path } => {
                 // Create an entry where the users cannot copy the text from it directly
                 // Make this object draggable and the payload should the the path of the object we are referencing in the ui.
-                let entry = ui.dnd_drag_source(Id::new(&*path), path.clone(), |ui| {
-                    ui.scope(|ui| {
-                        // Set this so we cannot select text
-                        ui.style_mut().interaction.selectable_labels = false;
+                let entry = ui.dnd_drag_source(
+                    Id::new(&*path),
+                    DNDSampleInstance {
+                        name: name.clone(),
+                        color: Color32::from_rgba_unmultiplied(
+                            255,
+                            255,
+                            255,
+                            120,
+                        ),
+                        properties: dragged_sample_props.clone(),
+                    },
+                    |ui| {
+                        ui.scope(|ui| {
+                            // Set this so we cannot select text
+                            ui.style_mut().interaction.selectable_labels = false;
 
-                        // Display the actual label
-                        ui.label(RichText::from(name.to_string_lossy()).background_color({
-                            // Highlight the label if the user has clicked on it
-                            if *selected_object != Some(path.clone()) {
-                                Color32::TRANSPARENT
-                            } else {
-                                Color32::GRAY
-                            }
-                        }))
-                        .interact(Sense::click_and_drag())
-                    })
-                });
+                            // Display the actual label
+                            ui.label(RichText::from(name.to_string_lossy()).background_color({
+                                // Highlight the label if the user has clicked on it
+                                if *selected_object != Some(path.clone()) {
+                                    Color32::TRANSPARENT
+                                } else {
+                                    Color32::GRAY
+                                }
+                            }))
+                        })
+                    },
+                );
 
-                let click = ui.interact(
+                // Catch both clicks and dragging in the ui
+                let entry_response = ui.interact(
                     entry.response.rect,
-                    Id::new(&*path).with("click"),
-                    Sense::click(),
+                    Id::new(&*path),
+                    Sense::click_and_drag(),
                 );
 
                 // Sense if the label is being clicked on
-                if click.clicked() {
+                if entry_response.clicked() {
                     // Modify the selected object variable, if it has been re-selected reset the value.
                     if *selected_object != Some(path.clone()) {
                         *selected_object = Some(path.clone());
@@ -291,20 +322,36 @@ fn display_filesystem_map(map: &mut FsMap, ui: &mut Ui, selected_object: &mut Op
                         *selected_object = None;
                     }
                 };
+
+                if entry_response.drag_started() {
+                    // Fetch information about the file we are dragging such as length, sample rate, etc. These will be used when inserted into the playlist.
+                    if let Some(props) = display_error_as_toast(
+                        fetch_sample_properties(&*path),
+                        ToastStyle::default(),
+                        toasts.clone(),
+                    ) {
+                        *dragged_sample_props = props;
+                    } else {
+                        ui.ctx().stop_dragging();
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::default());
+                    }
+                }
             }
             crate::internals::fs::FsObject::Symlink(os_string) => {
                 ui.label(RichText::from(os_string.to_string_lossy()).weak())
                     .on_hover_text("This file is a symlink.");
             }
-            crate::internals::fs::FsObject::Folder {
-                name,
-                path,
-                ref mut cache,
-            } => {
+            crate::internals::fs::FsObject::Folder { name, path, cache } => {
                 ui.collapsing(name.to_string_lossy(), |ui| match cache {
                     CacheState::Ready(map_result) => match map_result {
                         // Display the result of the read
-                        Some(entries) => display_filesystem_map(entries, ui, selected_object),
+                        Some(entries) => display_filesystem_map(
+                            entries,
+                            ui,
+                            selected_object,
+                            dragged_sample_props,
+                            toasts.clone(),
+                        ),
                         // If we failed to load the directory in we can always retry
                         None => {
                             ui.horizontal(|ui| {
