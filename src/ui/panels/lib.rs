@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RwLock};
 use strum::IntoDiscriminant;
 
 use crate::ui::panels::{
-    media::{FileSystemSelector, MediaPanel, mediapicker_ui},
+    media::{BookmarkSelector, FileSystemSelector, MediaPanel, mediapicker_ui},
     playlist::{PlaylistState, playlist_ui},
 };
 
@@ -101,8 +101,8 @@ pub fn create_panels() -> Vec<Panel> {
         Panel::new(
             PanelId::Media(Arc::new(RwLock::new(MediaPanel {
                 media_selector_state: crate::ui::panels::media::MediaSelectorState::Bookmarks,
-                bookmarks: IndexSet::new(),
-                filesystem_selector_state: FileSystemSelector::default(),
+                filesystem_selector: FileSystemSelector::default(),
+                bookmark_selector: BookmarkSelector::default(),
             }))),
             ViewportBuilder {
                 title: Some(String::from("Media")),

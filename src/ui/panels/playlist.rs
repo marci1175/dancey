@@ -55,6 +55,7 @@ pub struct PlaylistState {
     /// Can be modified with the bpm slider.
     pub bpm: f32,
 
+    #[serde(skip)]
     /// Indicates the position of the cursor.
     pub cursor_offset: f32,
 
@@ -66,7 +67,7 @@ pub struct PlaylistState {
 }
 
 const BPM_PRESETS: &[f32] = &[
-    60.0, 70.0, 80.0, 90.0, 100.00, 110.0, 120.0, 128.0, 140.0, 165.0, 174.0
+    60.0, 70.0, 80.0, 90.0, 100.00, 110.0, 120.0, 128.0, 140.0, 165.0, 174.0,
 ];
 
 pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>) {
@@ -80,17 +81,18 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
         ui.label("bpm");
 
         let playlist_bpm = &mut state.write().bpm;
-        ui.add(egui::Slider::new(playlist_bpm, 10.0..=522.0).fixed_decimals(3)).context_menu(|ui| {
-            ui.label("Presets");
-            
-            ui.separator();
+        ui.add(egui::Slider::new(playlist_bpm, 10.0..=522.0).fixed_decimals(3))
+            .context_menu(|ui| {
+                ui.label("Presets");
 
-            for bpm in BPM_PRESETS {
-                if ui.button(format!("{bpm} bpm")).clicked() {
-                    *playlist_bpm = *bpm;
+                ui.separator();
+
+                for bpm in BPM_PRESETS {
+                    if ui.button(format!("{bpm} bpm")).clicked() {
+                        *playlist_bpm = *bpm;
+                    }
                 }
-            }
-        });
+            });
     });
 
     ui.separator();
@@ -250,11 +252,8 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
             ];
 
             // Draw the rectangle indicating how long the sample is
-            ui.painter().rect_filled(
-                Rect::from_points(&rect_points),
-                0.,
-                payload.color,
-            );
+            ui.painter()
+                .rect_filled(Rect::from_points(&rect_points), 0., payload.color);
         }
     }
 
