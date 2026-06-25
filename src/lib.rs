@@ -1,6 +1,6 @@
 #![feature(portable_simd)]
 
-pub const APP_NAME: &'static str = "Dancey";
+pub const APP_NAME: &str = "Dancey";
 
 pub mod app;
 pub mod internals;

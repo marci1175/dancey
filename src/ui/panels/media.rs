@@ -1,9 +1,9 @@
-use std::{collections::HashMap, ffi::OsStr, path::PathBuf, rc::Rc, sync::Arc};
+use std::{ffi::OsStr, path::PathBuf, sync::Arc};
 
 use chrono::Utc;
-use egui::{Color32, Context, Id, RichText, ScrollArea, Sense, Ui, UiBuilder};
+use egui::{Color32, Id, Response, RichText, ScrollArea, Sense, Ui, UiBuilder};
 use egui_toast::{ToastStyle, Toasts};
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
 
 use crate::{
@@ -47,10 +47,6 @@ pub struct FileSystemSelector {
 
     /// Current folder that has been read
     pub current_folder: FsMap,
-
-    /// Currently dragged sample's properties
-    #[serde(skip)]
-    pub dragged_sample_props: SampleProperties,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -77,10 +73,16 @@ pub struct MediaPanel {
     /// The state of the FilesystemSelector
     pub filesystem_selector: FileSystemSelector,
 
+    /// These are dependent on the specific workspace we are working in so we can skip saving this. (This is what bookmarks are for)
+    #[serde(skip)]
     pub workspace_selector: WorkspaceSelector,
 
     /// The state of the BookmarkSelector
     pub bookmark_selector: BookmarkSelector,
+
+    /// Currently dragged sample's properties, this is global among all selectors
+    #[serde(skip)]
+    pub dragged_sample_props: SampleProperties,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -92,7 +94,7 @@ pub enum MediaSelectorState {
 
 /// This is what gets called when the panel is either attached or detached
 pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>) {
-    let media_selector_state = state.read().media_selector_state.clone();
+    let media_selector_state = state.read().media_selector_state;
 
     picker_type_selector(ui, state.clone(), &media_selector_state);
 
@@ -118,39 +120,22 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>)
             match media_selector_state {
                 MediaSelectorState::Bookmarks => {
                     let bookmarks = state.read().bookmark_selector.bookmarks.clone();
-                    let selected_bookmark_entry =
-                        &mut state.write().bookmark_selector.selected_object;
+                    let mut guard = state.write();
 
-                    for (path, bookmarks) in bookmarks {
-                        let entry = ui
-                            .scope(|ui| {
-                                ui.style_mut().interaction.selectable_labels = false;
+                    // Split the guarded state into disjoint mutable borrows up front.
+                    let state_ref = &mut *guard;
+                    let selected_object = &mut state_ref.bookmark_selector.selected_object;
+                    let dragged_sample_props = &mut state_ref.dragged_sample_props;
 
-                                ui.label(
-                                    RichText::from(bookmarks.alias.clone())
-                                        .strong()
-                                        .background_color({
-                                            // Highlight the label if the user has clicked on it
-                                            if *selected_bookmark_entry != Some(path.clone()) {
-                                                Color32::TRANSPARENT
-                                            } else {
-                                                Color32::GRAY
-                                            }
-                                        }),
-                                )
-                                .interact(Sense::click_and_drag())
-                            })
-                            .inner;
-
-                        if entry.clicked() {
-                            // Modify the selected object variable, if it has been re-selected reset the value.
-                            if *selected_bookmark_entry != Some(path.clone()) {
-                                *selected_bookmark_entry = Some(path.clone());
-                            } else {
-                                *selected_bookmark_entry = None;
-                            }
-                        };
-
+                    for (path, bookmark) in bookmarks {
+                        let entry = draggable_sample(
+                            ui,
+                            selected_object,
+                            dragged_sample_props,
+                            this.toasts.clone(),
+                            bookmark.alias.into(),
+                            path.clone(),
+                        );
                         entry.context_menu(|ui| {
                             ui.label(RichText::from(path.to_string_lossy()).weak());
                         });
@@ -175,22 +160,54 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>)
                     ui.separator();
 
                     // Borrow mutably
-                    let file_system_selector = &mut state.write().filesystem_selector;
+                    let mut guard = state.write();
+
+                    // Split the guarded state into disjoint mutable borrows up front,
+                    // so the borrow checker can see each field is independent.
+                    let state_ref = &mut *guard;
+                    let filesystem_selector = &mut state_ref.filesystem_selector;
+                    let dragged_sample_props = &mut state_ref.dragged_sample_props;
+
+                    // Split filesystem_selector's fields disjointly too.
+                    let current_folder = &mut filesystem_selector.current_folder;
+                    let selected_object = &mut filesystem_selector.selected_object;
 
                     // Display the mapped folder
                     ScrollArea::both()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             display_filesystem_map(
-                                &mut file_system_selector.current_folder,
                                 ui,
-                                &mut file_system_selector.selected_object,
-                                &mut file_system_selector.dragged_sample_props,
+                                current_folder,
+                                selected_object,
+                                dragged_sample_props,
                                 this.toasts.clone(),
                             );
                         });
                 }
-                MediaSelectorState::Workspace => {}
+                MediaSelectorState::Workspace => {
+                    let bookmarks = state.read().workspace_selector.workspace_samples.clone();
+                    let mut guard = state.write();
+
+                    // Split the guarded state into disjoint mutable borrows up front.
+                    let state_ref = &mut *guard;
+                    let selected_object = &mut state_ref.workspace_selector.selected_object;
+                    let dragged_sample_props = &mut state_ref.dragged_sample_props;
+
+                    for (path, bookmark) in bookmarks {
+                        let entry = draggable_sample(
+                            ui,
+                            selected_object,
+                            dragged_sample_props,
+                            this.toasts.clone(),
+                            bookmark.alias.into(),
+                            path.clone(),
+                        );
+                        entry.context_menu(|ui| {
+                            ui.label(RichText::from(path.to_string_lossy()).weak());
+                        });
+                    }
+                }
             }
         },
     );
@@ -423,12 +440,7 @@ fn picker_toolbar(
 }
 
 fn random_color_with_opacity() -> Color32 {
-    Color32::from_rgba_unmultiplied(
-        random_value(),
-        random_value(),
-        random_value(),
-        120,
-    )
+    Color32::from_rgba_unmultiplied(random_value(), random_value(), random_value(), 120)
 }
 
 fn picker_type_selector(
@@ -489,8 +501,8 @@ fn picker_type_selector(
 
 /// Display the map of directory items.
 fn display_filesystem_map(
-    map: &mut FsMap,
     ui: &mut Ui,
+    map: &mut FsMap,
     selected_object: &mut Option<PathBuf>,
     dragged_sample_props: &mut SampleProperties,
     toasts: Arc<Mutex<Toasts>>,
@@ -500,65 +512,14 @@ fn display_filesystem_map(
             crate::internals::fs::FsObject::File { name, path } => {
                 // Create an entry where the users cannot copy the text from it directly
                 // Make this object draggable and the payload should the the path of the object we are referencing in the ui.
-                let entry = ui.dnd_drag_source(
-                    Id::new(&*path),
-                    DNDSampleInstance {
-                        name: name.clone(),
-                        color: Color32::from_rgba_unmultiplied(255, 255, 255, 120),
-                        properties: dragged_sample_props.clone(),
-                    },
-                    |ui| {
-                        ui.scope(|ui| {
-                            // Set this so we cannot select text
-                            ui.style_mut().interaction.selectable_labels = false;
-
-                            // Display the actual label
-                            ui.label(
-                                RichText::from(name.to_string_lossy())
-                                    .strong()
-                                    .background_color({
-                                        // Highlight the label if the user has clicked on it
-                                        if *selected_object != Some(path.clone()) {
-                                            Color32::TRANSPARENT
-                                        } else {
-                                            Color32::GRAY
-                                        }
-                                    }),
-                            )
-                        })
-                    },
+                draggable_sample(
+                    ui,
+                    selected_object,
+                    dragged_sample_props,
+                    toasts.clone(),
+                    name.clone(),
+                    path.clone(),
                 );
-
-                // Catch both clicks and dragging in the ui
-                let entry_response = ui.interact(
-                    entry.response.rect,
-                    Id::new(&*path),
-                    Sense::click_and_drag(),
-                );
-
-                // Sense if the label is being clicked on
-                if entry_response.clicked() {
-                    // Modify the selected object variable, if it has been re-selected reset the value.
-                    if *selected_object != Some(path.clone()) {
-                        *selected_object = Some(path.clone());
-                    } else {
-                        *selected_object = None;
-                    }
-                };
-
-                if entry_response.drag_started() {
-                    // Fetch information about the file we are dragging such as length, sample rate, etc. These will be used when inserted into the playlist.
-                    if let Some(props) = display_error_as_toast(
-                        fetch_sample_properties(&*path),
-                        ToastStyle::default(),
-                        toasts.clone(),
-                    ) {
-                        *dragged_sample_props = props;
-                    } else {
-                        ui.ctx().stop_dragging();
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::default());
-                    }
-                }
             }
             crate::internals::fs::FsObject::Symlink(os_string) => {
                 ui.label(RichText::from(os_string.to_string_lossy()).weak())
@@ -569,8 +530,8 @@ fn display_filesystem_map(
                     CacheState::Ready(map_result) => match map_result {
                         // Display the result of the read
                         Some(entries) => display_filesystem_map(
-                            entries,
                             ui,
+                            entries,
                             selected_object,
                             dragged_sample_props,
                             toasts.clone(),
@@ -593,4 +554,92 @@ fn display_filesystem_map(
             }
         }
     }
+}
+
+fn draggable_sample(
+    ui: &mut Ui,
+    selected_object: &mut Option<PathBuf>,
+    dragged_sample_props: &mut SampleProperties,
+    toasts: Arc<Mutex<Toasts>>,
+    name: std::ffi::OsString,
+    path: PathBuf,
+) -> Response {
+    let entry = draggable_sample_label(
+        ui,
+        &*selected_object,
+        dragged_sample_props.clone(),
+        name.clone(),
+        path.clone(),
+    );
+
+    // Catch both clicks and dragging in the ui
+    let entry_response = ui.interact(
+        entry.response.rect,
+        Id::new(&*path),
+        Sense::click_and_drag(),
+    );
+
+    // Sense if the label is being clicked on
+    if entry_response.clicked() {
+        // Modify the selected object variable, if it has been re-selected reset the value.
+        if *selected_object != Some(path.clone()) {
+            *selected_object = Some(path.clone());
+        } else {
+            *selected_object = None;
+        }
+    };
+
+    if entry_response.drag_started() {
+        // Fetch information about the file we are dragging such as length, sample rate, etc. These will be used when inserted into the playlist.
+        if let Some(props) = display_error_as_toast(
+            fetch_sample_properties(&path),
+            ToastStyle::default(),
+            toasts.clone(),
+        ) {
+            *dragged_sample_props = props;
+        } else {
+            ui.ctx().stop_dragging();
+            ui.ctx().set_cursor_icon(egui::CursorIcon::default());
+        }
+    }
+
+    entry_response
+}
+
+fn draggable_sample_label(
+    ui: &mut Ui,
+    selected_object: &Option<PathBuf>,
+    dragged_sample_props: SampleProperties,
+    name: std::ffi::OsString,
+    path: PathBuf,
+) -> egui::InnerResponse<egui::InnerResponse<egui::Response>> {
+    
+    ui.dnd_drag_source(
+        Id::new(&*path),
+        DNDSampleInstance {
+            name: name.clone(),
+            color: Color32::from_rgba_unmultiplied(255, 255, 255, 120),
+            properties: dragged_sample_props.clone(),
+        },
+        |ui| {
+            ui.scope(|ui| {
+                // Set this so we cannot select text
+                ui.style_mut().interaction.selectable_labels = false;
+
+                // Display the actual label
+                ui.label(
+                    RichText::from(name.to_string_lossy())
+                        .strong()
+                        .background_color({
+                            // Highlight the label if the user has clicked on it
+                            if *selected_object != Some(path.clone()) {
+                                Color32::TRANSPARENT
+                            } else {
+                                Color32::GRAY
+                            }
+                        }),
+                )
+            })
+        },
+    )
 }

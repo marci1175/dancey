@@ -1,11 +1,10 @@
 use anyhow::anyhow;
 use std::{fs, path::PathBuf};
 use symphonia::core::{
-    audio::conv::IntoSample,
     formats::{FormatOptions, FormatReader, probe::Hint},
     io::MediaSourceStream,
     meta::MetadataOptions,
-    units::{Duration, Time, Timestamp},
+    units::{Time, Timestamp},
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]

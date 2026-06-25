@@ -6,14 +6,17 @@ use std::{
 
 use egui::{CentralPanel, Direction, Id, InnerResponse, Ui, Vec2, ViewportBuilder, ViewportId};
 use egui_toast::{Toast, ToastOptions, ToastStyle, Toasts};
-use indexmap::IndexSet;
 use parking_lot::{Mutex, RwLock};
-use serde::Deserialize;
 use strum::IntoDiscriminant;
 
-use crate::ui::panels::{
-    media::{BookmarkSelector, FileSystemSelector, MediaPanel, WorkspaceSelector, mediapicker_ui},
-    playlist::{PlaylistState, playlist_ui},
+use crate::{
+    internals::sample::SampleProperties,
+    ui::panels::{
+        media::{
+            BookmarkSelector, FileSystemSelector, MediaPanel, WorkspaceSelector, mediapicker_ui,
+        },
+        playlist::{PlaylistState, playlist_ui},
+    },
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, strum::EnumDiscriminants)]
@@ -30,7 +33,6 @@ pub enum PanelId {
     /// This is where we assemble the music from the clips
     Playlist(Arc<RwLock<PlaylistState>>),
 
-    PluginManager,
     Mixer,
 }
 
@@ -76,7 +78,6 @@ impl Panel {
             PanelId::Playlist(state) => {
                 display_panel(self, ui, state.clone(), "Playlist", playlist_ui)
             }
-            PanelId::PluginManager => todo!(),
             PanelId::Root => todo!(),
             PanelId::Mixer => todo!(),
         };
@@ -105,6 +106,8 @@ pub fn create_panels() -> Vec<Panel> {
                 filesystem_selector: FileSystemSelector::default(),
                 workspace_selector: WorkspaceSelector::default(),
                 bookmark_selector: BookmarkSelector::default(),
+                // Doesnt really matter what we set this to
+                dragged_sample_props: SampleProperties::default(),
             }))),
             ViewportBuilder {
                 title: Some(String::from("Media")),

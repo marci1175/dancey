@@ -1,4 +1,4 @@
-use std::hash::{BuildHasher, Hasher, RandomState};
+use std::hash::Hasher;
 
 use rand::{
     RngExt,

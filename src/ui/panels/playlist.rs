@@ -1,5 +1,4 @@
-use core::simd;
-use std::{collections::HashMap, ffi::OsString, ops::Add, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, ffi::OsString, ops::Add, sync::Arc};
 
 use crate::{internals::sample::SampleProperties, ui::panels::lib::Panel};
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2, vec2};
@@ -246,7 +245,7 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
                 Pos2::new(starting_x, starting_y),
                 Pos2::new(
                     (starting_x + rectangle_length).min(playlist_rect.right()),
-                    (starting_y + track_customization.height as f32)
+                    (starting_y + track_customization.height)
                         .min(track_lines[relative_track_pos][0].y),
                 ),
             ];
@@ -271,12 +270,12 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
 }
 
 fn get_track_customization(state: Arc<RwLock<PlaylistState>>, idx: usize) -> TrackCustomization {
-    let label_customization = match state.read().custom_tracks.get(&idx) {
+    
+
+    match state.read().custom_tracks.get(&idx) {
         Some(custom) => custom.clone(),
         None => TrackCustomization::named_default(idx),
-    };
-
-    label_customization
+    }
 }
 
 /// Draws main cursor (Indicates where we are in current playlist)
@@ -314,12 +313,12 @@ fn beat_outlines(
     while x_coord < max {
         let line_pos = [
             Pos2::new(
-                (x_coord as f32 + normalized_x_offset)
+                (x_coord + normalized_x_offset)
                     .clamp(playlist_rect.left(), playlist_rect.right()),
                 playlist_rect.top(),
             ),
             Pos2::new(
-                (x_coord as f32 + normalized_x_offset)
+                (x_coord + normalized_x_offset)
                     .clamp(playlist_rect.left(), playlist_rect.right()),
                 playlist_rect.bottom(),
             ),
