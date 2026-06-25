@@ -8,10 +8,11 @@ use egui::{CentralPanel, Direction, Id, InnerResponse, Ui, Vec2, ViewportBuilder
 use egui_toast::{Toast, ToastOptions, ToastStyle, Toasts};
 use indexmap::IndexSet;
 use parking_lot::{Mutex, RwLock};
+use serde::Deserialize;
 use strum::IntoDiscriminant;
 
 use crate::ui::panels::{
-    media::{BookmarkSelector, FileSystemSelector, MediaPanel, mediapicker_ui},
+    media::{BookmarkSelector, FileSystemSelector, MediaPanel, WorkspaceSelector, mediapicker_ui},
     playlist::{PlaylistState, playlist_ui},
 };
 
@@ -102,6 +103,7 @@ pub fn create_panels() -> Vec<Panel> {
             PanelId::Media(Arc::new(RwLock::new(MediaPanel {
                 media_selector_state: crate::ui::panels::media::MediaSelectorState::Bookmarks,
                 filesystem_selector: FileSystemSelector::default(),
+                workspace_selector: WorkspaceSelector::default(),
                 bookmark_selector: BookmarkSelector::default(),
             }))),
             ViewportBuilder {

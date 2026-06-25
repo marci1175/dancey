@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, path::PathBuf, rc::Rc, sync::Arc};
+use std::{collections::HashMap, ffi::OsStr, path::PathBuf, rc::Rc, sync::Arc};
 
 use chrono::Utc;
 use egui::{Color32, Context, Id, RichText, ScrollArea, Sense, Ui, UiBuilder};
@@ -24,7 +24,7 @@ pub struct BookmarkedObject {
     /// This can be modified by the user.
     pub alias: String,
     /// Timestamp of when it was saved
-    timestamp: chrono::DateTime<Utc>,
+    pub timestamp: chrono::DateTime<Utc>,
 }
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -42,7 +42,7 @@ pub struct FileSystemSelector {
     /// The path to the folder we have opened
     pub opened_folder: Option<PathBuf>,
 
-    /// The object selected in the media selector
+    /// The object selected in the file system selector
     pub selected_object: Option<PathBuf>,
 
     /// Current folder that has been read
@@ -53,6 +53,21 @@ pub struct FileSystemSelector {
     pub dragged_sample_props: SampleProperties,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct WorkspaceSampleAttributes {
+    pub alias: String,
+
+    pub color: Color32,
+}
+
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceSelector {
+    pub workspace_samples: IndexMap<PathBuf, WorkspaceSampleAttributes>,
+
+    /// The object selected in the workspace selector
+    pub selected_object: Option<PathBuf>,
+}
+
 /// State of the media selector panel.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MediaPanel {
@@ -61,6 +76,8 @@ pub struct MediaPanel {
 
     /// The state of the FilesystemSelector
     pub filesystem_selector: FileSystemSelector,
+
+    pub workspace_selector: WorkspaceSelector,
 
     /// The state of the BookmarkSelector
     pub bookmark_selector: BookmarkSelector,
@@ -75,64 +92,122 @@ pub enum MediaSelectorState {
 
 /// This is what gets called when the panel is either attached or detached
 pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>) {
-    let current_state = state.read().clone();
+    let media_selector_state = state.read().media_selector_state.clone();
 
-    // Decide width of both objects
-    let spacing = ui.spacing().item_spacing.x;
-    const MEDIAPICKER_STATE_COUNT: f32 = 3.0;
-    let width = (ui.available_width() - (spacing * (MEDIAPICKER_STATE_COUNT - 1.0)))
-        / MEDIAPICKER_STATE_COUNT;
-
-    // Create both buttons and make them take up all the space
-    ui.horizontal(|ui| {
-        if ui
-            .add_sized(
-                [width, 20.0],
-                egui::Button::selectable(
-                    current_state.media_selector_state == MediaSelectorState::Workspace,
-                    "Workspace",
-                ),
-            )
-            .clicked()
-        {
-            state.write().media_selector_state = MediaSelectorState::Workspace;
-        };
-
-        if ui
-            .add_sized(
-                [width, 20.0],
-                egui::Button::selectable(
-                    current_state.media_selector_state == MediaSelectorState::Bookmarks,
-                    "Bookmarks",
-                ),
-            )
-            .clicked()
-        {
-            state.write().media_selector_state = MediaSelectorState::Bookmarks;
-        };
-
-        if ui
-            .add_sized(
-                [width, 20.0],
-                egui::Button::selectable(
-                    current_state.media_selector_state == MediaSelectorState::FileSystem,
-                    "Files",
-                ),
-            )
-            .clicked()
-        {
-            state.write().media_selector_state = MediaSelectorState::FileSystem;
-        };
-    });
+    picker_type_selector(ui, state.clone(), &media_selector_state);
 
     ui.separator();
 
+    picker_toolbar(this, ui, state.clone(), media_selector_state);
+
+    ui.separator();
+
+    // Paint the rest of the ui with black and display the media selector here.
+    // We should handle both states of the media selector
+    ui.painter_at(ui.available_rect_before_wrap()).rect_filled(
+        ui.available_rect_before_wrap(),
+        5.,
+        Color32::BLACK,
+    );
+
+    // Allocate the ui for the media selector type
+    ui.scope_builder(
+        UiBuilder::new().max_rect(ui.available_rect_before_wrap()),
+        |ui| {
+            // Handle both states of the mediaselector
+            match media_selector_state {
+                MediaSelectorState::Bookmarks => {
+                    let bookmarks = state.read().bookmark_selector.bookmarks.clone();
+                    let selected_bookmark_entry =
+                        &mut state.write().bookmark_selector.selected_object;
+
+                    for (path, bookmarks) in bookmarks {
+                        let entry = ui
+                            .scope(|ui| {
+                                ui.style_mut().interaction.selectable_labels = false;
+
+                                ui.label(
+                                    RichText::from(bookmarks.alias.clone())
+                                        .strong()
+                                        .background_color({
+                                            // Highlight the label if the user has clicked on it
+                                            if *selected_bookmark_entry != Some(path.clone()) {
+                                                Color32::TRANSPARENT
+                                            } else {
+                                                Color32::GRAY
+                                            }
+                                        }),
+                                )
+                                .interact(Sense::click_and_drag())
+                            })
+                            .inner;
+
+                        if entry.clicked() {
+                            // Modify the selected object variable, if it has been re-selected reset the value.
+                            if *selected_bookmark_entry != Some(path.clone()) {
+                                *selected_bookmark_entry = Some(path.clone());
+                            } else {
+                                *selected_bookmark_entry = None;
+                            }
+                        };
+
+                        entry.context_menu(|ui| {
+                            ui.label(RichText::from(path.to_string_lossy()).weak());
+                        });
+                    }
+                }
+                // Draw file system selector
+                MediaSelectorState::FileSystem => {
+                    ui.separator();
+
+                    ui.label(
+                        RichText::from(
+                            state
+                                .read()
+                                .filesystem_selector
+                                .current_folder
+                                .name
+                                .to_string_lossy(),
+                        )
+                        .strong(),
+                    );
+
+                    ui.separator();
+
+                    // Borrow mutably
+                    let file_system_selector = &mut state.write().filesystem_selector;
+
+                    // Display the mapped folder
+                    ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            display_filesystem_map(
+                                &mut file_system_selector.current_folder,
+                                ui,
+                                &mut file_system_selector.selected_object,
+                                &mut file_system_selector.dragged_sample_props,
+                                this.toasts.clone(),
+                            );
+                        });
+                }
+                MediaSelectorState::Workspace => {}
+            }
+        },
+    );
+}
+
+fn picker_toolbar(
+    this: &Panel,
+    ui: &mut Ui,
+    state: Arc<parking_lot::lock_api::RwLock<parking_lot::RawRwLock, MediaPanel>>,
+    media_selector_state: MediaSelectorState,
+) {
     // Make sure to update the object count so that all widgets are properly sized.
     let toolbar_btn_count: f32 = {
-        (match current_state.media_selector_state {
+        (match media_selector_state {
             MediaSelectorState::Bookmarks => 3,
             MediaSelectorState::FileSystem => 3,
-            MediaSelectorState::Workspace => 1,
+            MediaSelectorState::Workspace => 2,
         } as f32)
     };
 
@@ -142,82 +217,122 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>)
 
     // Create a small toolbar for both media selectors
     ui.horizontal(|ui| {
-        match current_state.media_selector_state {
+        match media_selector_state {
             MediaSelectorState::Bookmarks => {
-                ui.add_enabled_ui(
-                    current_state.bookmark_selector.selected_object.is_some(),
-                    |ui| {
-                        if ui
-                            .add_sized([width, 20.0], egui::Button::new("Add to Workspace"))
-                            .clicked()
-                        {
+                let bookmark_selector = state.read().bookmark_selector.clone();
+
+                ui.add_enabled_ui(bookmark_selector.selected_object.is_some(), |ui| {
+                    if ui
+                        .add_sized([width, 20.0], egui::Button::new("Add to Workspace"))
+                        .clicked()
+                    {
+                        // Its safe to unwrap here due to the check above
+                        let selected_object = bookmark_selector.selected_object.as_ref().unwrap();
+
+                        // Fetch the selected object from the objects
+                        // Safe to unwrap here since the object cannot be selected if it has been removed or not present in the list.
+                        let (_idx, path, attr) = bookmark_selector
+                            .bookmarks
+                            .get_full(selected_object)
+                            .unwrap();
+
+                        // Store in the workspace tab
+                        state
+                            .write()
+                            .workspace_selector
+                            .workspace_samples
+                            .insert_full(
+                                path.clone(),
+                                WorkspaceSampleAttributes {
+                                    alias: attr.alias.clone(),
+                                    color: random_color_with_opacity(),
+                                },
+                            );
+                    };
+
+                    if ui
+                        .add_sized([width, 20.0], egui::Button::new("Remove"))
+                        .clicked()
+                    {
+                        // Its safe to unwrap here due to the check above
+                        let selected_object = bookmark_selector.selected_object.as_ref().unwrap();
+
+                        // Remove the bookmarked object from the bookmarks and reset the selected object field
+                        state
+                            .write()
+                            .bookmark_selector
+                            .bookmarks
+                            .swap_remove(selected_object);
+                        state.write().bookmark_selector.selected_object = None;
+                    };
+
+                    // Allocate a button in the pre calculated space
+                    let edit_response = ui.add_sized([width, 20.0], egui::Button::new("Edit"));
+
+                    // Create a popup when the edit button is lcicked with the editing options available
+                    egui::Popup::menu(&edit_response)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
                             // Its safe to unwrap here due to the check above
-                            // let selected_object = current_state
-                            //     .bookmark_selector
-                            //     .selected_object
-                            //     .as_ref()
-                            //     .unwrap();
-                        };
-
-                        if ui
-                            .add_sized([width, 20.0], egui::Button::new("Remove"))
-                            .clicked()
-                        {
-                            // Its safe to unwrap here due to the check above
-                            let selected_object = current_state
-                                .bookmark_selector
-                                .selected_object
-                                .as_ref()
-                                .unwrap();
-
-                            // Remove the bookmarked object from the bookmarks and reset the selected object field
-                            state
-                                .write()
-                                .bookmark_selector
-                                .bookmarks
-                                .swap_remove(selected_object);
-                            state.write().bookmark_selector.selected_object = None;
-                        };
-
-                        // Allocate a button in the pre calculated space
-                        let edit_response = ui
-                            .add_sized([width, 20.0], egui::Button::new("Edit"));
-
-                        // Create a popup when the edit button is lcicked with the editing options available
-                        egui::Popup::menu(&edit_response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).id(Id::new("bookmark_edit_button")).show(|ui| {
-                            // Its safe to unwrap here due to the check above
-                            let selected_object = current_state
-                                .bookmark_selector
-                                .selected_object
-                                .as_ref()
-                                .unwrap();
+                            let selected_object =
+                                bookmark_selector.selected_object.as_ref().unwrap();
 
                             // Tell the user what theyre editing
                             ui.label("Alias");
                             ui.separator();
 
                             // Edit the alias of the bookmark
-                            ui.text_edit_singleline(&mut state.write().bookmark_selector.bookmarks.get_mut(selected_object).unwrap().alias);
+                            ui.text_edit_singleline(
+                                &mut state
+                                    .write()
+                                    .bookmark_selector
+                                    .bookmarks
+                                    .get_mut(selected_object)
+                                    .unwrap()
+                                    .alias,
+                            );
                         });
-                    },
-                );
+                });
             }
             MediaSelectorState::FileSystem => {
+                let filesystem_selector = state.read().filesystem_selector.clone();
+
                 // Only enable this button if we can bookmark an object
                 ui.add_enabled_ui(
-                    current_state.filesystem_selector.opened_folder.is_some()
-                        && current_state.filesystem_selector.selected_object.is_some(),
+                    filesystem_selector.opened_folder.is_some()
+                        && filesystem_selector.selected_object.is_some(),
                     |ui| {
                         if ui
                             .add_sized([width, 20.0], egui::Button::new("Add to Workspace"))
                             .clicked()
-                        {};
+                        {
+                            // Its safe to unwrap here due to the check above
+                            let selected_object =
+                                filesystem_selector.selected_object.as_ref().unwrap();
+
+                            // Store in the workspace tab
+                            state
+                                .write()
+                                .workspace_selector
+                                .workspace_samples
+                                .insert_full(
+                                    selected_object.clone(),
+                                    WorkspaceSampleAttributes {
+                                        alias: selected_object
+                                            .file_name()
+                                            .unwrap_or(OsStr::new("[Unable to acquire file name]"))
+                                            .to_string_lossy()
+                                            .to_string(),
+                                        color: random_color_with_opacity(),
+                                    },
+                                );
+                        };
 
                         if ui
                             .add_sized([width, 20.0], egui::Button::new("★"))
                             .clicked()
                         {
-                            let path = current_state.filesystem_selector.selected_object.unwrap();
+                            let path = filesystem_selector.selected_object.as_ref().unwrap();
 
                             state.write().bookmark_selector.bookmarks.insert(
                                 path.clone(),
@@ -255,104 +370,121 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>)
                     }
                 };
             }
-            MediaSelectorState::Workspace => {}
-        }
-    });
+            MediaSelectorState::Workspace => {
+                let workspace_selector = state.read().workspace_selector.clone();
 
-    ui.separator();
+                ui.add_enabled_ui(workspace_selector.selected_object.is_some(), |ui| {
+                    if ui
+                        .add_sized([width, 20.0], egui::Button::new("Remove"))
+                        .clicked()
+                    {
+                        // Its safe to unwrap here due to the check above
+                        let selected_object = workspace_selector.selected_object.as_ref().unwrap();
 
-    // Paint the rest of the ui with black and display the media selector here.
-    // We should handle both states of the media selector
-    ui.painter_at(ui.available_rect_before_wrap()).rect_filled(
-        ui.available_rect_before_wrap(),
-        5.,
-        Color32::BLACK,
-    );
+                        // Remove the bookmarked object from the bookmarks and reset the selected object field
+                        state
+                            .write()
+                            .workspace_selector
+                            .workspace_samples
+                            .swap_remove(selected_object);
+                        state.write().workspace_selector.selected_object = None;
+                    };
 
-    // Allocate the ui for the mediaselector
-    ui.scope_builder(
-        UiBuilder::new().max_rect(ui.available_rect_before_wrap()),
-        |ui| {
-            // Handle both states of the mediaselector
-            match current_state.media_selector_state {
-                MediaSelectorState::Bookmarks => {
-                    let selected_bookmark_entry =
-                        &mut state.write().bookmark_selector.selected_object;
+                    // Allocate a button in the pre calculated space
+                    let edit_response = ui.add_sized([width, 20.0], egui::Button::new("Edit"));
 
-                    for (path, bookmarks) in current_state.bookmark_selector.bookmarks {
-                        let entry = ui
-                            .scope(|ui| {
-                                ui.style_mut().interaction.selectable_labels = false;
+                    // Create a popup when the edit button is lcicked with the editing options available
+                    egui::Popup::menu(&edit_response)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            // Its safe to unwrap here due to the check above
+                            let selected_object =
+                                workspace_selector.selected_object.as_ref().unwrap();
 
-                                ui.label(
-                                    RichText::from(
-                                        bookmarks.alias,
-                                    )
-                                    .strong()
-                                    .background_color({
-                                        // Highlight the label if the user has clicked on it
-                                        if *selected_bookmark_entry != Some(path.clone()) {
-                                            Color32::TRANSPARENT
-                                        } else {
-                                            Color32::GRAY
-                                        }
-                                    }),
-                                )
-                                .interact(Sense::click_and_drag())
-                            })
-                            .inner;
+                            // Tell the user what theyre editing
+                            ui.label("Alias");
+                            ui.separator();
 
-                        if entry.clicked() {
-                            // Modify the selected object variable, if it has been re-selected reset the value.
-                            if *selected_bookmark_entry != Some(path.clone()) {
-                                *selected_bookmark_entry = Some(path.clone());
-                            } else {
-                                *selected_bookmark_entry = None;
-                            }
-                        };
-
-                        entry.context_menu(|ui| {
-                            ui.label(RichText::from(path.to_string_lossy()).weak());
-                        });
-                    }
-                }
-                // Draw file system selector
-                MediaSelectorState::FileSystem => {
-                    ui.separator();
-
-                    ui.label(
-                        RichText::from(
-                            current_state
-                                .filesystem_selector
-                                .current_folder
-                                .name
-                                .to_string_lossy(),
-                        )
-                        .strong(),
-                    );
-
-                    ui.separator();
-
-                    // Borrow mutably
-                    let file_system_selector = &mut state.write().filesystem_selector;
-
-                    // Display the mapped folder
-                    ScrollArea::both()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            display_filesystem_map(
-                                &mut file_system_selector.current_folder,
-                                ui,
-                                &mut file_system_selector.selected_object,
-                                &mut file_system_selector.dragged_sample_props,
-                                this.toasts.clone(),
+                            // Edit the alias of the bookmark
+                            ui.text_edit_singleline(
+                                &mut state
+                                    .write()
+                                    .workspace_selector
+                                    .workspace_samples
+                                    .get_mut(selected_object)
+                                    .unwrap()
+                                    .alias,
                             );
                         });
-                }
-                MediaSelectorState::Workspace => {}
+                });
             }
-        },
-    );
+        }
+    });
+}
+
+fn random_color_with_opacity() -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        random_value(),
+        random_value(),
+        random_value(),
+        120,
+    )
+}
+
+fn picker_type_selector(
+    ui: &mut Ui,
+    state: Arc<RwLock<MediaPanel>>,
+    media_selector_state: &MediaSelectorState,
+) {
+    // Decide width of both objects
+    let spacing = ui.spacing().item_spacing.x;
+    const MEDIAPICKER_STATE_COUNT: f32 = 3.0;
+    let width = (ui.available_width() - (spacing * (MEDIAPICKER_STATE_COUNT - 1.0)))
+        / MEDIAPICKER_STATE_COUNT;
+
+    let selector_state = &mut state.write().media_selector_state;
+
+    // Create both buttons and make them take up all the space
+    ui.horizontal(|ui| {
+        if ui
+            .add_sized(
+                [width, 20.0],
+                egui::Button::selectable(
+                    *media_selector_state == MediaSelectorState::Workspace,
+                    "Workspace",
+                ),
+            )
+            .clicked()
+        {
+            *selector_state = MediaSelectorState::Workspace;
+        };
+
+        if ui
+            .add_sized(
+                [width, 20.0],
+                egui::Button::selectable(
+                    *media_selector_state == MediaSelectorState::Bookmarks,
+                    "Bookmarks",
+                ),
+            )
+            .clicked()
+        {
+            *selector_state = MediaSelectorState::Bookmarks;
+        };
+
+        if ui
+            .add_sized(
+                [width, 20.0],
+                egui::Button::selectable(
+                    *media_selector_state == MediaSelectorState::FileSystem,
+                    "Files",
+                ),
+            )
+            .clicked()
+        {
+            *selector_state = MediaSelectorState::FileSystem;
+        };
+    });
 }
 
 /// Display the map of directory items.
