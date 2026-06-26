@@ -147,6 +147,7 @@ pub fn create_panels() -> Vec<Panel> {
         Panel::new(
             PanelId::Playlist(Arc::new(RwLock::new(PlaylistState {
                 bpm: 120.0,
+                samples: Vec::new(),
                 cursor_offset: 0.0,
                 grid_offset: Vec2::default(),
                 custom_tracks: HashMap::new(),

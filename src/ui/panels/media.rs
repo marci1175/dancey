@@ -14,7 +14,7 @@ use crate::{
     },
     ui::panels::{
         lib::{Panel, display_error_as_toast},
-        playlist::DNDSampleInstance,
+        playlist::SampleInstance,
     },
 };
 
@@ -613,10 +613,9 @@ fn draggable_sample_label(
     name: std::ffi::OsString,
     path: PathBuf,
 ) -> egui::InnerResponse<egui::InnerResponse<egui::Response>> {
-    
     ui.dnd_drag_source(
         Id::new(&*path),
-        DNDSampleInstance {
+        SampleInstance {
             name: name.clone(),
             color: Color32::from_rgba_unmultiplied(255, 255, 255, 120),
             properties: dragged_sample_props.clone(),

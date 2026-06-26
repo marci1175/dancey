@@ -1,6 +1,9 @@
 use std::{collections::HashMap, ffi::OsString, ops::Add, sync::Arc};
 
-use crate::{internals::sample::SampleProperties, ui::panels::lib::Panel};
+use crate::{
+    internals::{sample::SampleProperties, utils::find_value_inbetween},
+    ui::panels::lib::Panel,
+};
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2, vec2};
 use parking_lot::RwLock;
 
@@ -30,7 +33,8 @@ pub struct TrackCustomization {
     pub height_set: bool,
 }
 
-pub struct DNDSampleInstance {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SampleInstance {
     pub name: OsString,
     pub color: Color32,
     pub properties: SampleProperties,
@@ -50,6 +54,12 @@ impl TrackCustomization {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PlaylistPosition {
+    pub track: usize,
+    pub beat: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlaylistState {
     /// Can be modified with the bpm slider.
     pub bpm: f32,
@@ -63,6 +73,8 @@ pub struct PlaylistState {
 
     /// Track customization
     pub custom_tracks: HashMap<usize, TrackCustomization>,
+
+    pub samples: Vec<(SampleInstance, PlaylistPosition)>,
 }
 
 const BPM_PRESETS: &[f32] = &[
@@ -104,16 +116,17 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
 
     // The total grid's offset (the amount the user has scrolled.)
     let grid_offset = state.read().grid_offset;
-    let normalized_y_offset = grid_offset.y / playlist_rect.height();
-    let normalized_x_offset = grid_offset.x / playlist_rect.width();
+
+    let y_offset_ratio = grid_offset.y / playlist_rect.height();
+    let x_offset_ratio = grid_offset.x / playlist_rect.width();
 
     // Track the positions of the lines drawn so that we can visualize the preview of a sample in the playlist.
-    let beat_lines = beat_outlines(ui, playlist_rect, normalized_x_offset, BEAT_WIDTH as f32);
+    let beat_lines = beat_outlines(ui, playlist_rect, x_offset_ratio, BEAT_WIDTH as f32);
     let mut track_lines = Vec::new();
 
-    let mut current_height = playlist_rect.top() + normalized_y_offset;
+    let mut current_height = playlist_rect.top() + y_offset_ratio;
     let mut idx = 0;
-    let max_height = playlist_rect.bottom() - normalized_y_offset;
+    let max_height = playlist_rect.bottom() - y_offset_ratio;
 
     let mut last_visible_track_idx = 0;
     let mut is_first_track_visible = false;
@@ -126,9 +139,9 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
         // Try getting the customization state for the current label
         let label_customization = get_track_customization(state.clone(), idx);
 
-        let top = (y_coord + normalized_y_offset).max(playlist_rect.top());
-        let bottom = (y_coord + normalized_y_offset + label_customization.height)
-            .min(playlist_rect.bottom());
+        let top = (y_coord + y_offset_ratio).max(playlist_rect.top());
+        let bottom =
+            (y_coord + y_offset_ratio + label_customization.height).min(playlist_rect.bottom());
 
         let is_visible = !(top >= playlist_rect.bottom() || bottom <= playlist_rect.top());
 
@@ -158,12 +171,14 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
             let separator_line = track_separator(
                 ui,
                 playlist_rect,
-                normalized_y_offset,
+                y_offset_ratio,
                 idx,
                 y_coord,
                 &label_customization,
                 custom_tracks,
             );
+
+            // Render currently visible tracks
 
             track_lines.push(separator_line);
         }
@@ -181,54 +196,98 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
     let ui_base = ui.allocate_rect(playlist_rect, Sense::hover());
 
     // If there is something dragged over the playlist preview the location of the sample
-    if let Some(payload) = ui_base.dnd_hover_payload::<DNDSampleInstance>() {
+    playlist_hover_sample(
+        ui,
+        &state,
+        playlist_rect,
+        &track_lines,
+        last_visible_track_idx,
+        &ui_base,
+    );
+
+    // Handle the sample if it is dropped into the playlist.
+    playlist_drop_sample(
+        ui,
+        state.clone(),
+        grid_offset,
+        track_lines,
+        last_visible_track_idx,
+        &ui_base,
+    );
+
+    // Get cursor position (offest)
+    let cursor_offset = state.read().cursor_offset;
+
+    // Draw cursor on playlist
+    draw_cursor(ui, playlist_rect, grid_offset, cursor_offset);
+
+    // Capture scroll if hovered
+    if ui_base.hovered() {
+        let scroll_delta = ui.input(|reader| reader.smooth_scroll_delta());
+        state.write().grid_offset = grid_offset.add(scroll_delta * 200.).min(Vec2::default());
+    }
+}
+
+fn playlist_drop_sample(
+    ui: &mut Ui,
+    state: Arc<parking_lot::lock_api::RwLock<parking_lot::RawRwLock, PlaylistState>>,
+    grid_offset: Vec2,
+    track_lines: Vec<[Pos2; 2]>,
+    last_visible_track_idx: usize,
+    ui_base: &egui::Response,
+) {
+    if let Some(payload) = ui_base.dnd_release_payload::<SampleInstance>() {
         // Get cursor position
         if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
-            // I think this will always get modified so handling this with option may be overkill
-            let mut starting_x = 0.0;
-            let mut starting_y = 0.0;
-
-            let mut relative_beat_pos = 0;
-            let mut relative_track_pos = 0;
-
             // Find starting beat position on the x axis
-            let mut idx = 0;
-
-            while idx < beat_lines.len() - 1 {
-                let lhs = beat_lines[idx];
-                let rhs = beat_lines[idx + 1];
-
-                idx += 1;
-
-                if cursor.x > lhs[0].x && cursor.x <= rhs[0].x {
-                    starting_x = lhs[0].x;
-                    relative_beat_pos = idx;
-
-                    break;
-                }
-            }
+            let (_, relative_beat_pos) =
+                find_value_inbetween(track_lines.iter().map(|v| v[0].x), cursor.x)
+                    .unwrap_or_default();
 
             // Find starting beat position on the y axis
-            let mut idx = 0;
-
-            while idx < track_lines.len() - 1 {
-                let lhs = track_lines[idx];
-                let rhs = track_lines[idx + 1];
-
-                idx += 1;
-
-                if cursor.y > lhs[0].y && cursor.y <= rhs[0].y {
-                    starting_y = lhs[0].y;
-                    relative_track_pos = idx;
-
-                    break;
-                }
-            }
+            let (_, relative_track_pos) =
+                find_value_inbetween(track_lines.iter().map(|v| v[0].y), cursor.y)
+                    .unwrap_or_default();
 
             let absolute_track_idx = last_visible_track_idx + relative_track_pos;
+
+            // We can derive the absolute beat position from the scroll offset, if we know how wide a beat is.
+            let absolute_beat_pos =
+                (relative_beat_pos.max(1) + (grid_offset.x / (BEAT_WIDTH as f32)) as usize) - 1;
+
+            state.write().samples.push(((*payload).clone(), PlaylistPosition { track: absolute_track_idx, beat: absolute_beat_pos }));
+        }
+    }
+}
+
+fn playlist_hover_sample(
+    ui: &mut Ui,
+    state: &Arc<parking_lot::lock_api::RwLock<parking_lot::RawRwLock, PlaylistState>>,
+    playlist_rect: Rect,
+    track_lines: &Vec<[Pos2; 2]>,
+    last_visible_track_idx: usize,
+    ui_base: &egui::Response,
+) {
+    if let Some(payload) = ui_base.dnd_hover_payload::<SampleInstance>() {
+        // Get cursor position
+        if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
+            // Find starting beat position on the x axis
+            let (starting_x, _) =
+                find_value_inbetween(track_lines.iter().map(|v| v[0].x), cursor.x)
+                    .unwrap_or_default();
+
+            // Find starting beat position on the y axis
+            let (starting_y, relative_track_pos) =
+                find_value_inbetween(track_lines.iter().map(|v| v[0].y), cursor.y)
+                    .unwrap_or_default();
+
+            let absolute_track_idx = last_visible_track_idx + relative_track_pos;
+
+            // Clamp both x and y for the preview to draw correctly.
             let starting_x = starting_x.max(playlist_rect.left() + TRACK_LABEL_WIDTH as f32);
             let starting_y = starting_y.max(playlist_rect.top());
 
+            // Fetch track attributes
             let track_customization = get_track_customization(state.clone(), absolute_track_idx);
 
             // Calculate rectangle length
@@ -255,23 +314,9 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
                 .rect_filled(Rect::from_points(&rect_points), 0., payload.color);
         }
     }
-
-    // Get cursor position (offest)
-    let cursor_offset = state.read().cursor_offset;
-
-    // Draw cursor on playlist
-    draw_cursor(ui, playlist_rect, grid_offset, cursor_offset);
-
-    // Capture scroll if hovered
-    if ui_base.hovered() {
-        let scroll_delta = ui.input(|reader| reader.smooth_scroll_delta());
-        state.write().grid_offset = grid_offset.add(scroll_delta * 200.).min(Vec2::default());
-    }
 }
 
 fn get_track_customization(state: Arc<RwLock<PlaylistState>>, idx: usize) -> TrackCustomization {
-    
-
     match state.read().custom_tracks.get(&idx) {
         Some(custom) => custom.clone(),
         None => TrackCustomization::named_default(idx),
@@ -313,13 +358,11 @@ fn beat_outlines(
     while x_coord < max {
         let line_pos = [
             Pos2::new(
-                (x_coord + normalized_x_offset)
-                    .clamp(playlist_rect.left(), playlist_rect.right()),
+                (x_coord + normalized_x_offset).clamp(playlist_rect.left(), playlist_rect.right()),
                 playlist_rect.top(),
             ),
             Pos2::new(
-                (x_coord + normalized_x_offset)
-                    .clamp(playlist_rect.left(), playlist_rect.right()),
+                (x_coord + normalized_x_offset).clamp(playlist_rect.left(), playlist_rect.right()),
                 playlist_rect.bottom(),
             ),
         ];
