@@ -1,5 +1,3 @@
-use std::hash::Hasher;
-
 use rand::{
     RngExt,
     distr::{Distribution, StandardUniform},

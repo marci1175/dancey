@@ -13,7 +13,7 @@ use crate::{
         utils::{CacheState, random_value},
     },
     ui::panels::{
-        lib::{Panel, display_error_as_toast},
+        lib::{Panel, PanelStates, display_error_as_toast},
         playlist::SampleInstance,
     },
 };
@@ -65,7 +65,7 @@ pub struct WorkspaceSelector {
 }
 
 /// State of the media selector panel.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MediaPanel {
     /// State of the complete media selector widget
     pub media_selector_state: MediaSelectorState,
@@ -85,15 +85,21 @@ pub struct MediaPanel {
     pub dragged_sample_props: SampleProperties,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum MediaSelectorState {
     Bookmarks,
+    #[default]
     FileSystem,
     Workspace,
 }
 
 /// This is what gets called when the panel is either attached or detached
-pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>) {
+pub fn mediapicker_ui(
+    this: &Panel,
+    ui: &mut Ui,
+    state: Arc<RwLock<MediaPanel>>,
+    _global_state: PanelStates,
+) {
     let media_selector_state = state.read().media_selector_state;
 
     picker_type_selector(ui, state.clone(), &media_selector_state);
@@ -186,7 +192,7 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>)
                         });
                 }
                 MediaSelectorState::Workspace => {
-                    let bookmarks = state.read().workspace_selector.workspace_samples.clone();
+                    let samples = state.read().workspace_selector.workspace_samples.clone();
                     let mut guard = state.write();
 
                     // Split the guarded state into disjoint mutable borrows up front.
@@ -194,13 +200,13 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, state: Arc<RwLock<MediaPanel>>)
                     let selected_object = &mut state_ref.workspace_selector.selected_object;
                     let dragged_sample_props = &mut state_ref.dragged_sample_props;
 
-                    for (path, bookmark) in bookmarks {
+                    for (path, sample) in samples {
                         let entry = draggable_sample(
                             ui,
                             selected_object,
                             dragged_sample_props,
                             this.toasts.clone(),
-                            bookmark.alias.into(),
+                            sample.alias.into(),
                             path.clone(),
                         );
                         entry.context_menu(|ui| {
@@ -618,6 +624,7 @@ fn draggable_sample_label(
         SampleInstance {
             name: name.clone(),
             color: Color32::from_rgba_unmultiplied(255, 255, 255, 120),
+            path: path.clone(),
             properties: dragged_sample_props.clone(),
         },
         |ui| {

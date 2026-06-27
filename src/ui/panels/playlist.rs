@@ -1,8 +1,11 @@
-use std::{collections::HashMap, ffi::OsString, ops::Add, sync::Arc};
+use std::{collections::HashMap, ffi::OsString, ops::Add, path::PathBuf, sync::Arc};
 
 use crate::{
     internals::{sample::SampleProperties, utils::find_value_inbetween},
-    ui::panels::lib::Panel,
+    ui::panels::{
+        lib::{Panel, PanelStates},
+        media::WorkspaceSampleAttributes,
+    },
 };
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2, vec2};
 use parking_lot::RwLock;
@@ -37,6 +40,7 @@ pub struct TrackCustomization {
 pub struct SampleInstance {
     pub name: OsString,
     pub color: Color32,
+    pub path: PathBuf,
     pub properties: SampleProperties,
 }
 
@@ -53,13 +57,13 @@ impl TrackCustomization {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PlaylistPosition {
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Copy, Hash, Eq, PartialEq)]
+pub struct Position {
     pub track: usize,
     pub beat: usize,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlaylistState {
     /// Can be modified with the bpm slider.
     pub bpm: f32,
@@ -74,20 +78,33 @@ pub struct PlaylistState {
     /// Track customization
     pub custom_tracks: HashMap<usize, TrackCustomization>,
 
-    pub samples: Vec<(SampleInstance, PlaylistPosition)>,
+    pub samples: HashMap<Position, SampleInstance>,
 }
 
 const BPM_PRESETS: &[f32] = &[
     60.0, 70.0, 80.0, 90.0, 100.00, 110.0, 120.0, 128.0, 140.0, 165.0, 174.0,
 ];
 
-pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>) {
+pub fn playlist_ui(
+    _this: &Panel,
+    ui: &mut Ui,
+    state: Arc<RwLock<PlaylistState>>,
+    global_state: PanelStates,
+) {
+    dbg!(
+        &global_state
+            .media_panel
+            .read()
+            .workspace_selector
+            .workspace_samples
+            .len()
+    );
     // Draw the main options / tools for this ui
     ui.horizontal(|ui| {
-        ui.button("Start");
-        ui.button("Pause");
-        ui.button("Stop");
-        ui.button("Patterns");
+        if ui.button("Start").clicked() {};
+        if ui.button("Pause").clicked() {};
+        if ui.button("Stop").clicked() {};
+        if ui.button("Patterns").clicked() {};
 
         ui.label("bpm");
 
@@ -121,13 +138,26 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
     let x_offset_ratio = grid_offset.x / playlist_rect.width();
 
     // Track the positions of the lines drawn so that we can visualize the preview of a sample in the playlist.
-    let beat_lines = beat_outlines(ui, playlist_rect, x_offset_ratio, BEAT_WIDTH as f32);
-    let mut track_lines = Vec::new();
+    // `first_visible_beat` tells us which absolute beat number `beat_lines[0]` corresponds to,
+    // since the vec itself is scroll-relative (index 0 = "first beat currently on screen").
+    let (first_visible_beat, beat_lines) =
+        beat_outlines(ui, playlist_rect, x_offset_ratio, BEAT_WIDTH as f32);
+
+    // Initalize the track lines list with the topmost line first.
+    let mut track_lines = vec![[
+        Pos2::new(playlist_rect.left(), playlist_rect.top()),
+        Pos2::new(playlist_rect.right(), playlist_rect.top()),
+    ]];
 
     let mut current_height = playlist_rect.top() + y_offset_ratio;
+
+    // The index for tracking the painting of each track
     let mut idx = 0;
+
     let max_height = playlist_rect.bottom() - y_offset_ratio;
 
+    // Indexes of the tracks which fulfill a certain criterium
+    let mut first_visible_track_idx = 0;
     let mut last_visible_track_idx = 0;
     let mut is_first_track_visible = false;
 
@@ -147,10 +177,11 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
 
         // This will always be set to the last visible track's idx after this while loop
         if !is_first_track_visible {
-            last_visible_track_idx = idx;
+            first_visible_track_idx = idx;
         }
 
         // Only display the track if its acutally visible
+        // Render currently visible tracks
         if is_visible {
             is_first_track_visible = true;
 
@@ -158,6 +189,7 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
             let custom_tracks: &mut HashMap<usize, TrackCustomization> =
                 &mut state.write().custom_tracks;
 
+            // Draw track labels
             track_label(
                 ui,
                 playlist_rect,
@@ -168,6 +200,7 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
                 custom_tracks,
             );
 
+            // Draw separator lines
             let separator_line = track_separator(
                 ui,
                 playlist_rect,
@@ -178,7 +211,8 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
                 custom_tracks,
             );
 
-            // Render currently visible tracks
+            // This will automatically set the index to the last visible track's index
+            last_visible_track_idx = idx;
 
             track_lines.push(separator_line);
         }
@@ -190,28 +224,45 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
         idx += 1;
     }
 
+    // Render currently present samples in the playlist
+    // We should render the samples because when we are creating them we are also allocation responses
+    // These responses would steal the input from the user if created after checking for input over the entire playlist.
+    render_samples(
+        ui,
+        state.clone(),
+        first_visible_track_idx,
+        last_visible_track_idx,
+        first_visible_beat,
+        playlist_rect,
+        &track_lines,
+        &beat_lines,
+    );
+
     // We are going to have multiple layers of responses each capturing something different
     // Allocate a response for the entirety of the playlist
     // The main playlist response should capture scrolling input in order to offset the whole grid
     let ui_base = ui.allocate_rect(playlist_rect, Sense::hover());
 
     // If there is something dragged over the playlist preview the location of the sample
-    playlist_hover_sample(
+    hover_sample(
         ui,
         &state,
         playlist_rect,
         &track_lines,
-        last_visible_track_idx,
+        &beat_lines,
+        first_visible_track_idx,
         &ui_base,
     );
 
     // Handle the sample if it is dropped into the playlist.
-    playlist_drop_sample(
+    drop_sample(
         ui,
         state.clone(),
-        grid_offset,
-        track_lines,
-        last_visible_track_idx,
+        global_state.clone(),
+        &track_lines,
+        &beat_lines,
+        first_visible_track_idx,
+        first_visible_beat,
         &ui_base,
     );
 
@@ -228,20 +279,116 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, state: Arc<RwLock<PlaylistState>>
     }
 }
 
-fn playlist_drop_sample(
+fn render_samples(
     ui: &mut Ui,
-    state: Arc<parking_lot::lock_api::RwLock<parking_lot::RawRwLock, PlaylistState>>,
-    grid_offset: Vec2,
-    track_lines: Vec<[Pos2; 2]>,
+    state: Arc<RwLock<PlaylistState>>,
+    before_first_visible_track_idx: usize,
     last_visible_track_idx: usize,
+    first_visible_beat: usize,
+    playlist_rect: Rect,
+    track_lines: &[[Pos2; 2]],
+    beat_lines: &[[Pos2; 2]],
+) {
+    // Iterate over the samples and decide which one is in frame.
+    let samples = state.read().samples.clone();
+
+    for (pos, sample) in samples {
+        // Check if the track is visible based on the track
+        if !(pos.track >= before_first_visible_track_idx && pos.track <= last_visible_track_idx) {
+            continue;
+        }
+
+        let line_idx = pos.beat as i64 - first_visible_beat as i64;
+
+        let start_pos = if line_idx >= 0 && (line_idx as usize) < beat_lines.len() {
+            beat_lines[line_idx as usize][0].x
+        } else if !beat_lines.is_empty() {
+            beat_lines[0][0].x + (line_idx as f32) * BEAT_WIDTH as f32
+        } else {
+            continue;
+        };
+
+        // Get track customization
+        let _track_customization = get_track_customization(state.clone(), pos.track);
+
+        // Calculate rectangle length
+        let bps = state.read().bpm / 60.;
+
+        // This is basically secs / bps * beat_width
+        let rectangle_length =
+            symphonia::core::units::Time::from_millis(sample.properties.length as i64).as_secs()
+                as f32
+                / bps
+                * BEAT_WIDTH as f32;
+
+        // If the sample isn't long enough to reach onto the screen, skip it.
+        if start_pos + rectangle_length < playlist_rect.left() + TRACK_LABEL_WIDTH as f32 {
+            continue;
+        }
+
+        // Create the rect where the sample might be rendered.
+        let sample_rect = Rect::from_min_max(
+            Pos2 {
+                x: start_pos.max(playlist_rect.left() + TRACK_LABEL_WIDTH as f32),
+                y: (track_lines[pos.track - before_first_visible_track_idx][0].y)
+                    .max(playlist_rect.top()),
+            },
+            Pos2 {
+                x: (start_pos + rectangle_length).min(playlist_rect.right()),
+                y: (track_lines[pos.track - before_first_visible_track_idx + 1][0].y)
+                    .min(playlist_rect.bottom()),
+            },
+        );
+
+        // Draw sample rect
+        ui.painter().rect_filled(sample_rect, 0., sample.color);
+
+        // Create galley for sample label
+        let galley = ui.fonts_mut(|f| {
+            f.layout(
+                sample.name.to_string_lossy().to_string(),
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+                sample_rect.width(),
+            )
+        });
+
+        // Draw sample text
+        ui.painter().with_clip_rect(sample_rect).galley(
+            sample_rect.left_top(),
+            galley,
+            egui::Color32::WHITE,
+        );
+
+        // Allocate a response over the sample to capture any inputs it receives
+        let sample_response = ui.allocate_rect(sample_rect, Sense::all());
+
+        // If the sample is dragged, simulate a dnd again
+        sample_response.dnd_set_drag_payload(sample.clone());
+
+        // Remove the old position of the sample
+        if sample_response.drag_stopped() {
+            state.write().samples.remove(&pos);
+        }
+    }
+}
+
+fn drop_sample(
+    ui: &mut Ui,
+    state: Arc<RwLock<PlaylistState>>,
+    global_state: PanelStates,
+    track_lines: &[[Pos2; 2]],
+    beat_lines: &[[Pos2; 2]],
+    first_visible_track_idx: usize,
+    first_visible_beat: usize,
     ui_base: &egui::Response,
 ) {
     if let Some(payload) = ui_base.dnd_release_payload::<SampleInstance>() {
         // Get cursor position
         if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
-            // Find starting beat position on the x axis
+            // Find starting beat position on the x axis (index into beat_lines)
             let (_, relative_beat_pos) =
-                find_value_inbetween(track_lines.iter().map(|v| v[0].x), cursor.x)
+                find_value_inbetween(beat_lines.iter().map(|v| v[0].x), cursor.x)
                     .unwrap_or_default();
 
             // Find starting beat position on the y axis
@@ -249,31 +396,51 @@ fn playlist_drop_sample(
                 find_value_inbetween(track_lines.iter().map(|v| v[0].y), cursor.y)
                     .unwrap_or_default();
 
-            let absolute_track_idx = last_visible_track_idx + relative_track_pos;
+            let absolute_track_idx = first_visible_track_idx + relative_track_pos;
 
-            // We can derive the absolute beat position from the scroll offset, if we know how wide a beat is.
-            let absolute_beat_pos =
-                (relative_beat_pos.max(1) + (grid_offset.x / (BEAT_WIDTH as f32)) as usize) - 1;
+            let absolute_beat_pos = relative_beat_pos.max(1) - 1 + first_visible_beat;
 
-            state.write().samples.push(((*payload).clone(), PlaylistPosition { track: absolute_track_idx, beat: absolute_beat_pos }));
+            // If anything gets dropped into the "workspace" aka the playlist then add it to the workspace files
+            global_state
+                .media_panel
+                .write()
+                .workspace_selector
+                .workspace_samples
+                .insert(
+                    payload.path.clone(),
+                    WorkspaceSampleAttributes {
+                        alias: payload.name.to_string_lossy().to_string(),
+                        color: payload.color,
+                    },
+                );
+
+            // Store sample in playlist
+            state.write().samples.insert(
+                Position {
+                    track: absolute_track_idx,
+                    beat: absolute_beat_pos,
+                },
+                (*payload).clone(),
+            );
         }
     }
 }
 
-fn playlist_hover_sample(
+fn hover_sample(
     ui: &mut Ui,
-    state: &Arc<parking_lot::lock_api::RwLock<parking_lot::RawRwLock, PlaylistState>>,
+    state: &Arc<RwLock<PlaylistState>>,
     playlist_rect: Rect,
-    track_lines: &Vec<[Pos2; 2]>,
-    last_visible_track_idx: usize,
+    track_lines: &[[Pos2; 2]],
+    beat_lines: &[[Pos2; 2]],
+    first_visible_track_idx: usize,
     ui_base: &egui::Response,
 ) {
     if let Some(payload) = ui_base.dnd_hover_payload::<SampleInstance>() {
         // Get cursor position
         if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
             // Find starting beat position on the x axis
-            let (starting_x, _) =
-                find_value_inbetween(track_lines.iter().map(|v| v[0].x), cursor.x)
+            let (starting_x, _relative_beat_pos) =
+                find_value_inbetween(beat_lines.iter().map(|v| v[0].x), cursor.x)
                     .unwrap_or_default();
 
             // Find starting beat position on the y axis
@@ -281,7 +448,7 @@ fn playlist_hover_sample(
                 find_value_inbetween(track_lines.iter().map(|v| v[0].y), cursor.y)
                     .unwrap_or_default();
 
-            let absolute_track_idx = last_visible_track_idx + relative_track_pos;
+            let absolute_track_idx = first_visible_track_idx + relative_track_pos;
 
             // Clamp both x and y for the preview to draw correctly.
             let starting_x = starting_x.max(playlist_rect.left() + TRACK_LABEL_WIDTH as f32);
@@ -299,6 +466,10 @@ fn playlist_hover_sample(
                     .as_secs() as f32
                     / bps
                     * BEAT_WIDTH as f32;
+
+            if relative_track_pos >= track_lines.len() {
+                return;
+            }
 
             let rect_points = [
                 Pos2::new(starting_x, starting_y),
@@ -341,30 +512,30 @@ fn draw_cursor(ui: &mut Ui, playlist_rect: Rect, grid_offset: Vec2, cursor_offse
 }
 
 /// Draws beat outlines from the left of the playlist to the right with the step of `beat_width`.
-/// The function returns the positions of the lines on the screen.
 fn beat_outlines(
     ui: &mut Ui,
     playlist_rect: Rect,
-    normalized_x_offset: f32,
+    x_offset_ratio: f32,
     beat_width: f32,
-) -> Vec<[Pos2; 2]> {
+) -> (usize, Vec<[Pos2; 2]>) {
     let mut line_positions = Vec::new();
-    let mut x_coord = playlist_rect.left() + normalized_x_offset;
-    let max = playlist_rect.right() - normalized_x_offset;
 
-    // Skip the first four spaces because that is allocated to the track label
-    x_coord += beat_width * 4.0;
+    // The position of "beat 0" (first beat after the label region) with no scroll applied.
+    let label_end = playlist_rect.left() + beat_width * 4.0;
 
-    while x_coord < max {
+    // Shift by the scroll offset to find where beat 0 currently sits on screen.
+    let beat_zero_x = label_end + x_offset_ratio;
+
+    // How many whole beats have scrolled past beat 0 (positive = scrolled right).
+    let beats_past_zero = ((label_end - beat_zero_x) / beat_width).ceil().max(0.0);
+
+    let first_visible_beat = beats_past_zero as usize;
+    let mut x_coord = beat_zero_x + beats_past_zero * beat_width;
+
+    while x_coord <= playlist_rect.right() {
         let line_pos = [
-            Pos2::new(
-                (x_coord + normalized_x_offset).clamp(playlist_rect.left(), playlist_rect.right()),
-                playlist_rect.top(),
-            ),
-            Pos2::new(
-                (x_coord + normalized_x_offset).clamp(playlist_rect.left(), playlist_rect.right()),
-                playlist_rect.bottom(),
-            ),
+            Pos2::new(x_coord, playlist_rect.top()),
+            Pos2::new(x_coord, playlist_rect.bottom()),
         ];
         ui.painter().line(
             line_pos.to_vec(),
@@ -377,7 +548,7 @@ fn beat_outlines(
         x_coord += beat_width;
     }
 
-    line_positions
+    (first_visible_beat, line_positions)
 }
 
 fn track_label<'a>(

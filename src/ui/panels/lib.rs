@@ -1,23 +1,23 @@
 use std::{
-    collections::HashMap,
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 
-use egui::{CentralPanel, Direction, Id, InnerResponse, Ui, Vec2, ViewportBuilder, ViewportId};
+use egui::{CentralPanel, Direction, Id, InnerResponse, Ui, ViewportBuilder, ViewportId};
 use egui_toast::{Toast, ToastOptions, ToastStyle, Toasts};
 use parking_lot::{Mutex, RwLock};
 use strum::IntoDiscriminant;
 
-use crate::{
-    internals::sample::SampleProperties,
-    ui::panels::{
-        media::{
-            BookmarkSelector, FileSystemSelector, MediaPanel, WorkspaceSelector, mediapicker_ui,
-        },
-        playlist::{PlaylistState, playlist_ui},
-    },
+use crate::ui::panels::{
+    media::{MediaPanel, mediapicker_ui},
+    playlist::{PlaylistState, playlist_ui},
 };
+
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PanelStates {
+    pub media_panel: Arc<RwLock<MediaPanel>>,
+    pub playlist_panel: Arc<RwLock<PlaylistState>>,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, strum::EnumDiscriminants)]
 #[strum_discriminants(derive(Hash))]
@@ -27,11 +27,11 @@ pub enum PanelId {
     Root,
 
     /// Media selector
-    Media(Arc<RwLock<MediaPanel>>),
+    Media,
 
     /// Playlist
     /// This is where we assemble the music from the clips
-    Playlist(Arc<RwLock<PlaylistState>>),
+    Playlist,
 
     Mixer,
 }
@@ -52,6 +52,9 @@ pub struct Panel {
     /// Specifies the type of the panel.
     pub id: PanelId,
 
+    /// The state of the panels inside, every panel state is accessible from the other one.
+    pub states: PanelStates,
+
     /// Tells if the panel is detached from the root ui.
     /// This field is thread safe, because we might need to access this from the child window.
     pub detached: Arc<AtomicBool>,
@@ -66,18 +69,29 @@ pub struct Panel {
     /// Viewport settings for the detached window.
     pub viewport_settings: ViewportBuilder,
 
+    /// Specifies where the panel should locate itself
     pub panel_type: PanelType,
 }
 
 impl Panel {
     pub fn display(&self, ui: &mut Ui) {
         match &self.id {
-            PanelId::Media(state) => {
-                display_panel(self, ui, state.clone(), "Media Picker", mediapicker_ui)
-            }
-            PanelId::Playlist(state) => {
-                display_panel(self, ui, state.clone(), "Playlist", playlist_ui)
-            }
+            PanelId::Media => display_panel(
+                self,
+                ui,
+                self.states.media_panel.clone(),
+                self.states.clone(),
+                "Media Picker",
+                mediapicker_ui,
+            ),
+            PanelId::Playlist => display_panel(
+                self,
+                ui,
+                self.states.playlist_panel.clone(),
+                self.states.clone(),
+                "Playlist",
+                playlist_ui,
+            ),
             PanelId::Root => todo!(),
             PanelId::Mixer => todo!(),
         };
@@ -88,6 +102,7 @@ impl Panel {
     pub fn new(id: PanelId, viewport_settings: ViewportBuilder, ty: PanelType) -> Self {
         Self {
             id,
+            states: PanelStates::default(),
             detached: Arc::new(AtomicBool::new(false)),
             toasts: Arc::new(Mutex::new(Toasts::new().direction(Direction::TopDown))),
             viewport_settings,
@@ -101,14 +116,7 @@ pub fn create_panels() -> Vec<Panel> {
     vec![
         // Media picker
         Panel::new(
-            PanelId::Media(Arc::new(RwLock::new(MediaPanel {
-                media_selector_state: crate::ui::panels::media::MediaSelectorState::Bookmarks,
-                filesystem_selector: FileSystemSelector::default(),
-                workspace_selector: WorkspaceSelector::default(),
-                bookmark_selector: BookmarkSelector::default(),
-                // Doesnt really matter what we set this to
-                dragged_sample_props: SampleProperties::default(),
-            }))),
+            PanelId::Media,
             ViewportBuilder {
                 title: Some(String::from("Media")),
                 app_id: None,
@@ -145,13 +153,7 @@ pub fn create_panels() -> Vec<Panel> {
         ),
         // Playlist
         Panel::new(
-            PanelId::Playlist(Arc::new(RwLock::new(PlaylistState {
-                bpm: 120.0,
-                samples: Vec::new(),
-                cursor_offset: 0.0,
-                grid_offset: Vec2::default(),
-                custom_tracks: HashMap::new(),
-            }))),
+            PanelId::Playlist,
             ViewportBuilder {
                 title: Some(String::from("Playlist")),
                 app_id: None,
@@ -240,12 +242,20 @@ pub fn display_error_as_toast<T, E: ToString>(
 }
 
 /// Display a detachable panel in a pre-determined position.
-pub fn display_panel<T: Send + Sync + 'static + Clone>(
+pub fn display_panel<
+    STATE: Send + Sync + 'static + Clone,
+    GLOBALSTATE: Send + Sync + 'static + Clone,
+>(
     this: &Panel,
     ui: &mut Ui,
-    state: T,
+    state: STATE,
+    global_state: GLOBALSTATE,
     title: &'static str,
-    display_ui: impl FnOnce(&Panel, &mut Ui, T) + std::marker::Send + std::marker::Sync + 'static + Copy,
+    display_ui: impl FnOnce(&Panel, &mut Ui, STATE, GLOBALSTATE)
+    + std::marker::Send
+    + std::marker::Sync
+    + 'static
+    + Copy,
 ) -> Option<InnerResponse<()>> {
     // Allocate the sidepanel for the panel
     // Match the detached panel's state
@@ -261,16 +271,13 @@ pub fn display_panel<T: Send + Sync + 'static + Clone>(
                 move |ui, _viewport| {
                     // Clone state here to that we can move it
                     let state = state.clone();
+                    let global_state = global_state.clone();
                     let toasts = this.toasts.clone();
-
-                    // I am not sure why this is not working when creating the panel and the viewport
-                    // If i uncomment this `ctx.request_repaint_of(ViewportId::ROOT);` wont work as intended
-                    // ctx.send_viewport_cmd(egui::ViewportCommand::Title(String::from("Media")));
 
                     CentralPanel::default().show_inside(ui, |ui| {
                         // Display the title of the panel
                         display_panel_title(&this, ui, title);
-                        (display_ui)(&this, ui, state);
+                        (display_ui)(&this, ui, state, global_state);
 
                         // Display toasts added to child window
                         toasts.lock().show(ui);
@@ -289,7 +296,7 @@ pub fn display_panel<T: Send + Sync + 'static + Clone>(
                         display_panel_title(this, ui, title);
 
                         // Display ui of the panel
-                        (display_ui)(this, ui, state)
+                        (display_ui)(this, ui, state, global_state)
                     })
                 }
                 super::lib::PanelType::Left => {
@@ -298,7 +305,7 @@ pub fn display_panel<T: Send + Sync + 'static + Clone>(
                         display_panel_title(this, ui, title);
 
                         // Display ui of the panel
-                        (display_ui)(this, ui, state)
+                        (display_ui)(this, ui, state, global_state)
                     })
                 }
                 super::lib::PanelType::Right => {
@@ -307,7 +314,7 @@ pub fn display_panel<T: Send + Sync + 'static + Clone>(
                         display_panel_title(this, ui, title);
 
                         // Display ui of the panel
-                        (display_ui)(this, ui, state)
+                        (display_ui)(this, ui, state, global_state)
                     })
                 }
                 super::lib::PanelType::Top => {
@@ -316,7 +323,7 @@ pub fn display_panel<T: Send + Sync + 'static + Clone>(
                         display_panel_title(this, ui, title);
 
                         // Display ui of the panel
-                        (display_ui)(this, ui, state)
+                        (display_ui)(this, ui, state, global_state)
                     })
                 }
                 super::lib::PanelType::Bottom => {
@@ -325,7 +332,7 @@ pub fn display_panel<T: Send + Sync + 'static + Clone>(
                         display_panel_title(this, ui, title);
 
                         // Display ui of the panel
-                        (display_ui)(this, ui, state)
+                        (display_ui)(this, ui, state, global_state)
                     })
                 }
             }
