@@ -99,37 +99,31 @@ pub fn generate_sample_waveform(path: &PathBuf) -> anyhow::Result<Vec<[f32; 2]>>
 
     let track_id = default_track.id;
 
-    // Raw samples of the audio file
     let mut samples: Vec<f32> = Vec::default();
     let mut channel_count = 0;
+    let mut packet_buf: Vec<f32> = Vec::new();
 
-    // Save all the samples from the buffer
-    while let Some(packet) = probe.next_packet().unwrap() {
-        // If the packet does not belong to the selected track, skip it.
+    while let Some(packet) = probe.next_packet()? {
         if packet.track_id != track_id {
             continue;
         }
-
-        // Decode the packet into audio samples, ignoring any decode errors.
         match decoder.decode(&packet) {
             Ok(audio_buf) => {
-                // Grab the first packet and save its channel count
                 if channel_count == 0 {
                     channel_count = audio_buf.spec().channels().count();
                 }
-
-                samples.resize(audio_buf.samples_interleaved(), f32::MID);
-
-                audio_buf.copy_to_slice_interleaved(&mut samples);
+                packet_buf.resize(audio_buf.samples_interleaved(), f32::MID);
+                audio_buf.copy_to_slice_interleaved(&mut packet_buf);
+                samples.extend_from_slice(&packet_buf); // append, don't overwrite
             }
             Err(symphonia::core::errors::Error::DecodeError(_)) => (),
             Err(_) => break,
         }
     }
 
-    let avg_channel_input = avg_values_in_window(&samples, dbg!(channel_count));
+    let avg_channel_input = avg_values_in_window(&samples, channel_count);
 
-    let value_pairs = min_max_in_window(&avg_channel_input, 1);
+    let value_pairs = min_max_in_window(&avg_channel_input, 1024);
 
     return Ok(value_pairs);
 }
