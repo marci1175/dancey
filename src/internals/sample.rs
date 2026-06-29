@@ -118,19 +118,8 @@ pub fn generate_sample_waveform(path: &PathBuf) -> anyhow::Result<Vec<[f32; 2]>>
                     channel_count = audio_buf.spec().channels().count();
                 }
 
-                // The decoded audio samples may now be accessed via the generic audio buffer
-                // returned by the decoder. You may match on the buffer to access a sample-format
-                // specific buffer, or use generic routines to copy out the audio samples in the
-                // desired sample format.
-                //
-                // In the example below, we will copy the all the samples into a vector in
-                // the f32 sample format in channel interleaved order.
-
-                // Ensure the vector is large enough to hold all the samples.
                 samples.resize(audio_buf.samples_interleaved(), f32::MID);
 
-                // Copy the audio samples from the generic audio buffer to the vector in interleaved
-                // order. The sample format to convert to is inferred from the type of the Vec.
                 audio_buf.copy_to_slice_interleaved(&mut samples);
             }
             Err(symphonia::core::errors::Error::DecodeError(_)) => (),
