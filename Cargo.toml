@@ -10,7 +10,7 @@ eframe = {version = "0.34.3", features = ["persistence"]}
 egui = "0.34.3"
 rfd = "0.17.2"
 rodio = {version = "0.22.2", features = ["symphonia-all"]}
-serde = "1.0.228"
+serde = { version = "1.0.228", features = ["rc"]}
 parking_lot = { version = "0.12.5", features = ["serde"] }
 symphonia = {version = "0.6.0", features = ["all"]}
 egui-toast = "0.20.0"

@@ -1,13 +1,17 @@
-use std::{collections::HashMap, ffi::OsString, ops::Add, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, ops::Add, path::PathBuf, sync::Arc};
 
 use crate::{
-    internals::{sample::SampleProperties, utils::find_value_inbetween},
+    internals::{
+        sample::SampleProperties,
+        utils::find_value_inbetween,
+    },
     ui::panels::{
-        lib::{Panel, PanelStates},
+        lib::{Panel, PanelStates, random_color_with_opacity},
         media::WorkspaceSampleAttributes,
     },
 };
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2, vec2};
+use indexmap::IndexMap;
 use parking_lot::RwLock;
 
 const TRACK_LABEL: Color32 = Color32::ORANGE;
@@ -38,7 +42,7 @@ pub struct TrackCustomization {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SampleInstance {
-    pub name: OsString,
+    pub name: String,
     pub color: Color32,
     pub path: PathBuf,
     pub properties: SampleProperties,
@@ -63,6 +67,17 @@ pub struct Position {
     pub beat: usize,
 }
 
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum PlaybackState {
+    /// When the plaback is currently ongoing
+    Playing,
+    /// When the placback has been stopped
+    Paused,
+    /// When the player hasnt been initalized
+    #[default]
+    Stopped,
+}
+
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlaylistState {
     /// Can be modified with the bpm slider.
@@ -78,32 +93,50 @@ pub struct PlaylistState {
     /// Track customization
     pub custom_tracks: HashMap<usize, TrackCustomization>,
 
-    pub samples: HashMap<Position, SampleInstance>,
+    pub samples: IndexMap<Position, SampleInstance>,
+
+    pub playback_state: PlaybackState,
 }
 
 const BPM_PRESETS: &[f32] = &[
     60.0, 70.0, 80.0, 90.0, 100.00, 110.0, 120.0, 128.0, 140.0, 165.0, 174.0,
 ];
 
-pub fn playlist_ui(
-    _this: &Panel,
-    ui: &mut Ui,
-    state: Arc<RwLock<PlaylistState>>,
-    global_state: PanelStates,
-) {
-    dbg!(
-        &global_state
-            .media_panel
-            .read()
-            .workspace_selector
-            .workspace_samples
-            .len()
-    );
+pub fn playlist_ui(_this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>) {
+    let state = &global_state.playlist_panel;
+
     // Draw the main options / tools for this ui
     ui.horizontal(|ui| {
-        if ui.button("Start").clicked() {};
-        if ui.button("Pause").clicked() {};
-        if ui.button("Stop").clicked() {};
+        let current_playback_state = state.read().playback_state.clone();
+
+        // Display playback main controls based on current state
+        match current_playback_state {
+            PlaybackState::Playing => {
+                if ui.button("Pause").clicked() {
+                    state.write().playback_state = PlaybackState::Paused;
+                };
+            }
+            PlaybackState::Paused => {
+                if ui.button("Unpause").clicked() {
+                    state.write().playback_state = PlaybackState::Playing;
+                };
+            }
+            PlaybackState::Stopped => {
+                if ui.button("Play").clicked() {
+                    state.write().playback_state = PlaybackState::Paused;
+                }
+            }
+        }
+
+        // Only enable this button if its not stopped
+        ui.add_enabled_ui(current_playback_state != PlaybackState::Stopped, |ui| {
+            if ui.button("Stop").clicked() {
+                state.write().playback_state = PlaybackState::Stopped;
+            }
+        });
+
+        ui.separator();
+
         if ui.button("Patterns").clicked() {};
 
         ui.label("bpm");
@@ -167,7 +200,7 @@ pub fn playlist_ui(
         let y_coord = current_height;
 
         // Try getting the customization state for the current label
-        let label_customization = get_track_customization(state.clone(), idx);
+        let label_customization = get_track_customization(state, idx);
 
         let top = (y_coord + y_offset_ratio).max(playlist_rect.top());
         let bottom =
@@ -229,7 +262,7 @@ pub fn playlist_ui(
     // These responses would steal the input from the user if created after checking for input over the entire playlist.
     render_samples(
         ui,
-        state.clone(),
+        state,
         first_visible_track_idx,
         last_visible_track_idx,
         first_visible_beat,
@@ -246,7 +279,7 @@ pub fn playlist_ui(
     // If there is something dragged over the playlist preview the location of the sample
     hover_sample(
         ui,
-        &state,
+        state,
         playlist_rect,
         &track_lines,
         &beat_lines,
@@ -257,7 +290,7 @@ pub fn playlist_ui(
     // Handle the sample if it is dropped into the playlist.
     drop_sample(
         ui,
-        state.clone(),
+        state,
         global_state.clone(),
         &track_lines,
         &beat_lines,
@@ -281,7 +314,7 @@ pub fn playlist_ui(
 
 fn render_samples(
     ui: &mut Ui,
-    state: Arc<RwLock<PlaylistState>>,
+    state: &RwLock<PlaylistState>,
     before_first_visible_track_idx: usize,
     last_visible_track_idx: usize,
     first_visible_beat: usize,
@@ -309,7 +342,7 @@ fn render_samples(
         };
 
         // Get track customization
-        let _track_customization = get_track_customization(state.clone(), pos.track);
+        let _track_customization = get_track_customization(state, pos.track);
 
         // Calculate rectangle length
         let bps = state.read().bpm / 60.;
@@ -346,7 +379,7 @@ fn render_samples(
         // Create galley for sample label
         let galley = ui.fonts_mut(|f| {
             f.layout(
-                sample.name.to_string_lossy().to_string(),
+                sample.name.clone(),
                 egui::FontId::proportional(12.0),
                 egui::Color32::WHITE,
                 sample_rect.width(),
@@ -356,9 +389,11 @@ fn render_samples(
         // Draw sample text
         ui.painter().with_clip_rect(sample_rect).galley(
             sample_rect.left_top(),
-            galley,
+            galley.clone(),
             egui::Color32::WHITE,
         );
+
+        ui.painter().rect_filled(galley.rect, 0., Color32::WHITE);
 
         // Allocate a response over the sample to capture any inputs it receives
         let sample_response = ui.allocate_rect(sample_rect, Sense::all());
@@ -368,15 +403,15 @@ fn render_samples(
 
         // Remove the old position of the sample
         if sample_response.drag_stopped() {
-            state.write().samples.remove(&pos);
+            state.write().samples.swap_remove(&pos);
         }
     }
 }
 
 fn drop_sample(
     ui: &mut Ui,
-    state: Arc<RwLock<PlaylistState>>,
-    global_state: PanelStates,
+    state: &RwLock<PlaylistState>,
+    global_state: Arc<PanelStates>,
     track_lines: &[[Pos2; 2]],
     beat_lines: &[[Pos2; 2]],
     first_visible_track_idx: usize,
@@ -396,23 +431,79 @@ fn drop_sample(
                 find_value_inbetween(track_lines.iter().map(|v| v[0].y), cursor.y)
                     .unwrap_or_default();
 
-            let absolute_track_idx = first_visible_track_idx + relative_track_pos;
+            // We have to subtract one from the relative position since the first track's position is out of bounds (its the topmost line of the whole playlist)
+            let absolute_track_idx = first_visible_track_idx + relative_track_pos - 1;
 
             let absolute_beat_pos = relative_beat_pos.max(1) - 1 + first_visible_beat;
 
             // If anything gets dropped into the "workspace" aka the playlist then add it to the workspace files
-            global_state
+            // Look up if we have already stored this one sample
+            let query = global_state
                 .media_panel
-                .write()
+                .read()
                 .workspace_selector
                 .workspace_samples
-                .insert(
-                    payload.path.clone(),
-                    WorkspaceSampleAttributes {
-                        alias: payload.name.to_string_lossy().to_string(),
-                        color: payload.color,
-                    },
-                );
+                .get(&payload.path)
+                .cloned();
+
+            let sample_instance = if let Some(sample_info) = query {
+                global_state
+                    .media_panel
+                    .write()
+                    .workspace_selector
+                    .workspace_samples
+                    .insert(
+                        payload.path.clone(),
+                        WorkspaceSampleAttributes {
+                            alias: payload.name.clone(),
+                            is_color_synced: sample_info.is_color_synced,
+                            color: {
+                                // If the color is synced return the color from the workspace query
+                                if sample_info.is_color_synced {
+                                    sample_info.color
+                                }
+                                // If the color is not synced then we can carry on using the current color
+                                else {
+                                    payload.color
+                                }
+                            },
+                        },
+                    );
+
+                SampleInstance {
+                    name: sample_info.alias.clone(),
+                    color: sample_info.color,
+                    path: payload.path.clone(),
+                    properties: payload.properties.clone(),
+                }
+            }
+            // Initalize new sample in workspace
+            // Generate a new random color for it
+            else {
+                let random_color = random_color_with_opacity(120);
+                global_state
+                    .media_panel
+                    .write()
+                    .workspace_selector
+                    .workspace_samples
+                    .insert(
+                        payload.path.clone(),
+                        WorkspaceSampleAttributes {
+                            alias: payload.name.clone(),
+
+                            // All samples have their color synced by default.
+                            is_color_synced: true,
+                            color: random_color,
+                        },
+                    );
+
+                SampleInstance {
+                    name: payload.name.clone(),
+                    color: random_color,
+                    path: payload.path.clone(),
+                    properties: payload.properties.clone(),
+                }
+            };
 
             // Store sample in playlist
             state.write().samples.insert(
@@ -420,7 +511,7 @@ fn drop_sample(
                     track: absolute_track_idx,
                     beat: absolute_beat_pos,
                 },
-                (*payload).clone(),
+                sample_instance.clone(),
             );
         }
     }
@@ -428,7 +519,7 @@ fn drop_sample(
 
 fn hover_sample(
     ui: &mut Ui,
-    state: &Arc<RwLock<PlaylistState>>,
+    state: &RwLock<PlaylistState>,
     playlist_rect: Rect,
     track_lines: &[[Pos2; 2]],
     beat_lines: &[[Pos2; 2]],
@@ -448,14 +539,15 @@ fn hover_sample(
                 find_value_inbetween(track_lines.iter().map(|v| v[0].y), cursor.y)
                     .unwrap_or_default();
 
-            let absolute_track_idx = first_visible_track_idx + relative_track_pos;
+            // We have to subtract one from the relative position since the first track's position is out of bounds (its the topmost line of the whole playlist)
+            let absolute_track_idx = first_visible_track_idx + relative_track_pos - 1;
 
             // Clamp both x and y for the preview to draw correctly.
             let starting_x = starting_x.max(playlist_rect.left() + TRACK_LABEL_WIDTH as f32);
             let starting_y = starting_y.max(playlist_rect.top());
 
             // Fetch track attributes
-            let track_customization = get_track_customization(state.clone(), absolute_track_idx);
+            let track_customization = get_track_customization(state, absolute_track_idx);
 
             // Calculate rectangle length
             let bps = state.read().bpm / 60.;
@@ -487,7 +579,7 @@ fn hover_sample(
     }
 }
 
-fn get_track_customization(state: Arc<RwLock<PlaylistState>>, idx: usize) -> TrackCustomization {
+fn get_track_customization(state: &RwLock<PlaylistState>, idx: usize) -> TrackCustomization {
     match state.read().custom_tracks.get(&idx) {
         Some(custom) => custom.clone(),
         None => TrackCustomization::named_default(idx),

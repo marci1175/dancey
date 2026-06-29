@@ -3,20 +3,23 @@ use std::{
     time::Duration,
 };
 
-use egui::{CentralPanel, Direction, Id, InnerResponse, Ui, ViewportBuilder, ViewportId};
+use egui::{CentralPanel, Color32, Direction, Id, InnerResponse, Ui, ViewportBuilder, ViewportId};
 use egui_toast::{Toast, ToastOptions, ToastStyle, Toasts};
 use parking_lot::{Mutex, RwLock};
 use strum::IntoDiscriminant;
 
-use crate::ui::panels::{
-    media::{MediaPanel, mediapicker_ui},
-    playlist::{PlaylistState, playlist_ui},
+use crate::{
+    internals::utils::random_value,
+    ui::panels::{
+        media::{MediaPanel, mediapicker_ui},
+        playlist::{PlaylistState, playlist_ui},
+    },
 };
 
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PanelStates {
-    pub media_panel: Arc<RwLock<MediaPanel>>,
-    pub playlist_panel: Arc<RwLock<PlaylistState>>,
+    pub media_panel: RwLock<MediaPanel>,
+    pub playlist_panel: RwLock<PlaylistState>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, strum::EnumDiscriminants)]
@@ -52,9 +55,6 @@ pub struct Panel {
     /// Specifies the type of the panel.
     pub id: PanelId,
 
-    /// The state of the panels inside, every panel state is accessible from the other one.
-    pub states: PanelStates,
-
     /// Tells if the panel is detached from the root ui.
     /// This field is thread safe, because we might need to access this from the child window.
     pub detached: Arc<AtomicBool>,
@@ -74,24 +74,18 @@ pub struct Panel {
 }
 
 impl Panel {
-    pub fn display(&self, ui: &mut Ui) {
+    pub fn display(&self, ui: &mut Ui, global_state: Arc<PanelStates>) {
         match &self.id {
             PanelId::Media => display_panel(
                 self,
                 ui,
-                self.states.media_panel.clone(),
-                self.states.clone(),
+                global_state.clone(),
                 "Media Picker",
                 mediapicker_ui,
             ),
-            PanelId::Playlist => display_panel(
-                self,
-                ui,
-                self.states.playlist_panel.clone(),
-                self.states.clone(),
-                "Playlist",
-                playlist_ui,
-            ),
+            PanelId::Playlist => {
+                display_panel(self, ui, global_state.clone(), "Playlist", playlist_ui)
+            }
             PanelId::Root => todo!(),
             PanelId::Mixer => todo!(),
         };
@@ -102,7 +96,6 @@ impl Panel {
     pub fn new(id: PanelId, viewport_settings: ViewportBuilder, ty: PanelType) -> Self {
         Self {
             id,
-            states: PanelStates::default(),
             detached: Arc::new(AtomicBool::new(false)),
             toasts: Arc::new(Mutex::new(Toasts::new().direction(Direction::TopDown))),
             viewport_settings,
@@ -113,6 +106,8 @@ impl Panel {
 
 /// This function creates the default state of the panels
 pub fn create_panels() -> Vec<Panel> {
+    let _global_state = Arc::new(PanelStates::default());
+
     vec![
         // Media picker
         Panel::new(
@@ -242,16 +237,12 @@ pub fn display_error_as_toast<T, E: ToString>(
 }
 
 /// Display a detachable panel in a pre-determined position.
-pub fn display_panel<
-    STATE: Send + Sync + 'static + Clone,
-    GLOBALSTATE: Send + Sync + 'static + Clone,
->(
+pub fn display_panel<GLOBALSTATE: Send + Sync + 'static + Clone>(
     this: &Panel,
     ui: &mut Ui,
-    state: STATE,
     global_state: GLOBALSTATE,
     title: &'static str,
-    display_ui: impl FnOnce(&Panel, &mut Ui, STATE, GLOBALSTATE)
+    display_ui: impl FnOnce(&Panel, &mut Ui, GLOBALSTATE)
     + std::marker::Send
     + std::marker::Sync
     + 'static
@@ -270,14 +261,13 @@ pub fn display_panel<
                 this.viewport_settings.clone(),
                 move |ui, _viewport| {
                     // Clone state here to that we can move it
-                    let state = state.clone();
                     let global_state = global_state.clone();
                     let toasts = this.toasts.clone();
 
                     CentralPanel::default().show_inside(ui, |ui| {
                         // Display the title of the panel
                         display_panel_title(&this, ui, title);
-                        (display_ui)(&this, ui, state, global_state);
+                        (display_ui)(&this, ui, global_state);
 
                         // Display toasts added to child window
                         toasts.lock().show(ui);
@@ -296,7 +286,7 @@ pub fn display_panel<
                         display_panel_title(this, ui, title);
 
                         // Display ui of the panel
-                        (display_ui)(this, ui, state, global_state)
+                        (display_ui)(this, ui, global_state)
                     })
                 }
                 super::lib::PanelType::Left => {
@@ -305,7 +295,7 @@ pub fn display_panel<
                         display_panel_title(this, ui, title);
 
                         // Display ui of the panel
-                        (display_ui)(this, ui, state, global_state)
+                        (display_ui)(this, ui, global_state)
                     })
                 }
                 super::lib::PanelType::Right => {
@@ -314,7 +304,7 @@ pub fn display_panel<
                         display_panel_title(this, ui, title);
 
                         // Display ui of the panel
-                        (display_ui)(this, ui, state, global_state)
+                        (display_ui)(this, ui, global_state)
                     })
                 }
                 super::lib::PanelType::Top => {
@@ -323,7 +313,7 @@ pub fn display_panel<
                         display_panel_title(this, ui, title);
 
                         // Display ui of the panel
-                        (display_ui)(this, ui, state, global_state)
+                        (display_ui)(this, ui, global_state)
                     })
                 }
                 super::lib::PanelType::Bottom => {
@@ -332,10 +322,14 @@ pub fn display_panel<
                         display_panel_title(this, ui, title);
 
                         // Display ui of the panel
-                        (display_ui)(this, ui, state, global_state)
+                        (display_ui)(this, ui, global_state)
                     })
                 }
             }
         }),
     }
+}
+
+pub fn random_color_with_opacity(alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(random_value(), random_value(), random_value(), alpha)
 }

@@ -1,16 +1,25 @@
+use std::sync::Arc;
+
 use eframe::{App, CreationContext};
 
-use crate::ui::panels::lib::{Panel, create_panels};
+use crate::ui::panels::lib::{Panel, PanelStates, create_panels};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Application {
+    /// The state of the panels inside, every panel state is accessible from the other one.
+    panel_states: Arc<PanelStates>,
+
+    /// The list of panels that are present in the application.
     panels: Vec<Panel>,
 }
 
 impl Default for Application {
     fn default() -> Self {
         Self {
+            // Store the state of the panels separately
+            panel_states: Arc::new(PanelStates::default()),
+
             // Complete list of all of the panels of the application
             panels: create_panels(),
         }
@@ -49,7 +58,7 @@ impl App for Application {
         // Draw detachable panels
         for panel in self.panels.iter() {
             // Draw/update panel
-            panel.display(ui);
+            panel.display(ui, self.panel_states.clone());
 
             // If the panel is not detached we can display its toasts in the root ui
             if !panel.detached.load(std::sync::atomic::Ordering::Relaxed) {

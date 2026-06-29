@@ -24,7 +24,7 @@ pub fn find_value_inbetween<T: PartialOrd>(
     let mut lhs = values.next()?;
     for rhs in values {
         idx += 1;
-        if value > lhs && value <= rhs {
+        if value >= lhs && value <= rhs {
             return Some((lhs, idx));
         }
         lhs = rhs;

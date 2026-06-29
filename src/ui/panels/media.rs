@@ -10,10 +10,10 @@ use crate::{
     internals::{
         fs::{FsMap, create_entry_map},
         sample::{SampleProperties, fetch_sample_properties},
-        utils::{CacheState, random_value},
+        utils::CacheState,
     },
     ui::panels::{
-        lib::{Panel, PanelStates, display_error_as_toast},
+        lib::{Panel, PanelStates, display_error_as_toast, random_color_with_opacity},
         playlist::SampleInstance,
     },
 };
@@ -51,8 +51,14 @@ pub struct FileSystemSelector {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct WorkspaceSampleAttributes {
+    /// Samples can be aliased for easier recognition.
     pub alias: String,
 
+    /// This just indicated whether the color should be the uniform color set for this sample in the workspace.
+    /// If this is false the user can freely set its color.
+    pub is_color_synced: bool,
+
+    /// What color should we paint this sample in the playlist.
     pub color: Color32,
 }
 
@@ -94,19 +100,16 @@ pub enum MediaSelectorState {
 }
 
 /// This is what gets called when the panel is either attached or detached
-pub fn mediapicker_ui(
-    this: &Panel,
-    ui: &mut Ui,
-    state: Arc<RwLock<MediaPanel>>,
-    _global_state: PanelStates,
-) {
+pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>) {
+    let state = &global_state.media_panel;
+
     let media_selector_state = state.read().media_selector_state;
 
-    picker_type_selector(ui, state.clone(), &media_selector_state);
+    picker_type_selector(ui, state, &media_selector_state);
 
     ui.separator();
 
-    picker_toolbar(this, ui, state.clone(), media_selector_state);
+    picker_toolbar(this, ui, state, media_selector_state);
 
     ui.separator();
 
@@ -222,7 +225,7 @@ pub fn mediapicker_ui(
 fn picker_toolbar(
     this: &Panel,
     ui: &mut Ui,
-    state: Arc<parking_lot::lock_api::RwLock<parking_lot::RawRwLock, MediaPanel>>,
+    state: &RwLock<MediaPanel>,
     media_selector_state: MediaSelectorState,
 ) {
     // Make sure to update the object count so that all widgets are properly sized.
@@ -268,7 +271,8 @@ fn picker_toolbar(
                                 path.clone(),
                                 WorkspaceSampleAttributes {
                                     alias: attr.alias.clone(),
-                                    color: random_color_with_opacity(),
+                                    is_color_synced: true,
+                                    color: random_color_with_opacity(120),
                                 },
                             );
                     };
@@ -346,7 +350,8 @@ fn picker_toolbar(
                                             .unwrap_or(OsStr::new("[Unable to acquire file name]"))
                                             .to_string_lossy()
                                             .to_string(),
-                                        color: random_color_with_opacity(),
+                                        is_color_synced: true,
+                                        color: random_color_with_opacity(120),
                                     },
                                 );
                         };
@@ -445,13 +450,9 @@ fn picker_toolbar(
     });
 }
 
-fn random_color_with_opacity() -> Color32 {
-    Color32::from_rgba_unmultiplied(random_value(), random_value(), random_value(), 120)
-}
-
 fn picker_type_selector(
     ui: &mut Ui,
-    state: Arc<RwLock<MediaPanel>>,
+    state: &RwLock<MediaPanel>,
     media_selector_state: &MediaSelectorState,
 ) {
     // Decide width of both objects
@@ -622,7 +623,7 @@ fn draggable_sample_label(
     ui.dnd_drag_source(
         Id::new(&*path),
         SampleInstance {
-            name: name.clone(),
+            name: name.to_string_lossy().to_string(),
             color: Color32::from_rgba_unmultiplied(255, 255, 255, 120),
             path: path.clone(),
             properties: dragged_sample_props.clone(),
