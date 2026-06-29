@@ -74,7 +74,9 @@ pub struct Panel {
 }
 
 impl Panel {
+    /// Displays the given panel based on its properties.
     pub fn display(&self, ui: &mut Ui, global_state: Arc<PanelStates>) {
+        // Match the kind of panel we want to display
         match &self.id {
             PanelId::Media => display_panel(
                 self,

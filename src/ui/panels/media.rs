@@ -2,14 +2,14 @@ use std::{ffi::OsStr, path::PathBuf, sync::Arc};
 
 use chrono::Utc;
 use egui::{Color32, Id, Response, RichText, ScrollArea, Sense, Ui, UiBuilder};
-use egui_toast::{ToastStyle, Toasts};
+use egui_toast::{Toast, ToastStyle, Toasts};
 use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
 
 use crate::{
     internals::{
         fs::{FsMap, create_entry_map},
-        sample::{SampleProperties, fetch_sample_properties},
+        sample::{SampleProperties, fetch_sample_properties, generate_sample_waveform},
         utils::CacheState,
     },
     ui::panels::{
@@ -49,6 +49,7 @@ pub struct FileSystemSelector {
     pub current_folder: FsMap,
 }
 
+/// These are solely for differentiating samples in the current workspace.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct WorkspaceSampleAttributes {
     /// Samples can be aliased for easier recognition.
@@ -58,8 +59,10 @@ pub struct WorkspaceSampleAttributes {
     /// If this is false the user can freely set its color.
     pub is_color_synced: bool,
 
-    /// What color should we paint this sample in the playlist.
+    /// What color should we paint this sample in the playlist. (by default)
     pub color: Color32,
+
+    pub waveform_map: Option<Vec<[f32; 2]>>,
 }
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -91,11 +94,17 @@ pub struct MediaPanel {
     pub dragged_sample_props: SampleProperties,
 }
 
+/// The type of the media selector that should be displayed.
 #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum MediaSelectorState {
+    /// Bookmarked objects.    
     Bookmarks,
+
+    /// Display files from the filesystem.
     #[default]
     FileSystem,
+
+    /// Display currently imported items.
     Workspace,
 }
 
@@ -135,6 +144,7 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>)
                     let state_ref = &mut *guard;
                     let selected_object = &mut state_ref.bookmark_selector.selected_object;
                     let dragged_sample_props = &mut state_ref.dragged_sample_props;
+                    let workspace_samples = &state_ref.workspace_selector.workspace_samples;
 
                     for (path, bookmark) in bookmarks {
                         let entry = draggable_sample(
@@ -144,6 +154,7 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>)
                             this.toasts.clone(),
                             bookmark.alias.into(),
                             path.clone(),
+                            workspace_samples,
                         );
                         entry.context_menu(|ui| {
                             ui.label(RichText::from(path.to_string_lossy()).weak());
@@ -181,6 +192,8 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>)
                     let current_folder = &mut filesystem_selector.current_folder;
                     let selected_object = &mut filesystem_selector.selected_object;
 
+                    let workspace_samples = &state_ref.workspace_selector.workspace_samples;
+
                     // Display the mapped folder
                     ScrollArea::both()
                         .auto_shrink([false, false])
@@ -190,6 +203,7 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>)
                                 current_folder,
                                 selected_object,
                                 dragged_sample_props,
+                                workspace_samples,
                                 this.toasts.clone(),
                             );
                         });
@@ -202,6 +216,7 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>)
                     let state_ref = &mut *guard;
                     let selected_object = &mut state_ref.workspace_selector.selected_object;
                     let dragged_sample_props = &mut state_ref.dragged_sample_props;
+                    let workspace_samples = &state_ref.workspace_selector.workspace_samples;
 
                     for (path, sample) in samples {
                         let entry = draggable_sample(
@@ -211,6 +226,7 @@ pub fn mediapicker_ui(this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>)
                             this.toasts.clone(),
                             sample.alias.into(),
                             path.clone(),
+                            workspace_samples,
                         );
                         entry.context_menu(|ui| {
                             ui.label(RichText::from(path.to_string_lossy()).weak());
@@ -248,34 +264,14 @@ fn picker_toolbar(
                 let bookmark_selector = state.read().bookmark_selector.clone();
 
                 ui.add_enabled_ui(bookmark_selector.selected_object.is_some(), |ui| {
-                    if ui
-                        .add_sized([width, 20.0], egui::Button::new("Add to Workspace"))
-                        .clicked()
-                    {
-                        // Its safe to unwrap here due to the check above
-                        let selected_object = bookmark_selector.selected_object.as_ref().unwrap();
-
-                        // Fetch the selected object from the objects
-                        // Safe to unwrap here since the object cannot be selected if it has been removed or not present in the list.
-                        let (_idx, path, attr) = bookmark_selector
-                            .bookmarks
-                            .get_full(selected_object)
-                            .unwrap();
-
-                        // Store in the workspace tab
-                        state
-                            .write()
-                            .workspace_selector
-                            .workspace_samples
-                            .insert_full(
-                                path.clone(),
-                                WorkspaceSampleAttributes {
-                                    alias: attr.alias.clone(),
-                                    is_color_synced: true,
-                                    color: random_color_with_opacity(120),
-                                },
-                            );
-                    };
+                    // Its safe to unwrap here due to the check above
+                    add_sample_to_workspace(
+                        this,
+                        state,
+                        width,
+                        bookmark_selector.selected_object.as_ref(),
+                        ui,
+                    );
 
                     if ui
                         .add_sized([width, 20.0], egui::Button::new("Remove"))
@@ -329,32 +325,14 @@ fn picker_toolbar(
                     filesystem_selector.opened_folder.is_some()
                         && filesystem_selector.selected_object.is_some(),
                     |ui| {
-                        if ui
-                            .add_sized([width, 20.0], egui::Button::new("Add to Workspace"))
-                            .clicked()
-                        {
-                            // Its safe to unwrap here due to the check above
-                            let selected_object =
-                                filesystem_selector.selected_object.as_ref().unwrap();
-
-                            // Store in the workspace tab
-                            state
-                                .write()
-                                .workspace_selector
-                                .workspace_samples
-                                .insert_full(
-                                    selected_object.clone(),
-                                    WorkspaceSampleAttributes {
-                                        alias: selected_object
-                                            .file_name()
-                                            .unwrap_or(OsStr::new("[Unable to acquire file name]"))
-                                            .to_string_lossy()
-                                            .to_string(),
-                                        is_color_synced: true,
-                                        color: random_color_with_opacity(120),
-                                    },
-                                );
-                        };
+                        // Its safe to unwrap here due to the check above
+                        add_sample_to_workspace(
+                            this,
+                            state,
+                            width,
+                            filesystem_selector.selected_object.as_ref(),
+                            ui,
+                        );
 
                         if ui
                             .add_sized([width, 20.0], egui::Button::new("★"))
@@ -450,6 +428,55 @@ fn picker_toolbar(
     });
 }
 
+fn add_sample_to_workspace(
+    this: &Panel,
+    state: &parking_lot::lock_api::RwLock<parking_lot::RawRwLock, MediaPanel>,
+    width: f32,
+    selected_object: Option<&PathBuf>,
+    ui: &mut Ui,
+) {
+    if ui
+        .add_sized([width, 20.0], egui::Button::new("Add to Workspace"))
+        .clicked()
+    {
+        // Its safe to unwrap here due to the check above
+        let selected_object = selected_object.unwrap();
+        let object_name = selected_object
+            .file_name()
+            .unwrap_or(OsStr::new("[Unable to acquire file name]"))
+            .to_string_lossy()
+            .to_string();
+
+        this.toasts.lock().add(
+            Toast::new()
+                .kind(egui_toast::ToastKind::Info)
+                .text(format!("Imported sample `{object_name}`")),
+        );
+
+        // Map the waveforms of the sample if it hadnt been inserted yet
+        let waveform_map = display_error_as_toast(
+            generate_sample_waveform(selected_object),
+            ToastStyle::default(),
+            this.toasts.clone(),
+        );
+
+        // Store in the workspace tab
+        state
+            .write()
+            .workspace_selector
+            .workspace_samples
+            .insert_full(
+                selected_object.clone(),
+                WorkspaceSampleAttributes {
+                    alias: object_name,
+                    is_color_synced: true,
+                    color: random_color_with_opacity(120),
+                    waveform_map: waveform_map,
+                },
+            );
+    };
+}
+
 fn picker_type_selector(
     ui: &mut Ui,
     state: &RwLock<MediaPanel>,
@@ -512,6 +539,7 @@ fn display_filesystem_map(
     map: &mut FsMap,
     selected_object: &mut Option<PathBuf>,
     dragged_sample_props: &mut SampleProperties,
+    workspace_samples: &IndexMap<PathBuf, WorkspaceSampleAttributes>,
     toasts: Arc<Mutex<Toasts>>,
 ) {
     for entry in &mut map.objects {
@@ -526,6 +554,7 @@ fn display_filesystem_map(
                     toasts.clone(),
                     name.clone(),
                     path.clone(),
+                    workspace_samples,
                 );
             }
             crate::internals::fs::FsObject::Symlink(os_string) => {
@@ -541,6 +570,7 @@ fn display_filesystem_map(
                             entries,
                             selected_object,
                             dragged_sample_props,
+                            workspace_samples,
                             toasts.clone(),
                         ),
                         // If we failed to load the directory in we can always retry
@@ -570,12 +600,14 @@ fn draggable_sample(
     toasts: Arc<Mutex<Toasts>>,
     name: std::ffi::OsString,
     path: PathBuf,
+    workspace_samples: &IndexMap<PathBuf, WorkspaceSampleAttributes>,
 ) -> Response {
     let entry = draggable_sample_label(
         ui,
         &*selected_object,
         dragged_sample_props.clone(),
         name.clone(),
+        workspace_samples,
         path.clone(),
     );
 
@@ -618,15 +650,24 @@ fn draggable_sample_label(
     selected_object: &Option<PathBuf>,
     dragged_sample_props: SampleProperties,
     name: std::ffi::OsString,
+    workspace_samples: &IndexMap<PathBuf, WorkspaceSampleAttributes>,
     path: PathBuf,
 ) -> egui::InnerResponse<egui::InnerResponse<egui::Response>> {
     ui.dnd_drag_source(
         Id::new(&*path),
         SampleInstance {
             name: name.to_string_lossy().to_string(),
-            color: Color32::from_rgba_unmultiplied(255, 255, 255, 120),
+            color: {
+                // Try looking up the workspace if we have already imported this sample
+                if let Some(sample) = workspace_samples.get(&path) {
+                    sample.color
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 120)
+                }
+            },
             path: path.clone(),
             properties: dragged_sample_props.clone(),
+            waveform_map: None,
         },
         |ui| {
             ui.scope(|ui| {

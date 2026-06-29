@@ -2,15 +2,16 @@ use std::{collections::HashMap, ops::Add, path::PathBuf, sync::Arc};
 
 use crate::{
     internals::{
-        sample::SampleProperties,
+        sample::{SampleProperties, generate_sample_waveform},
         utils::find_value_inbetween,
     },
     ui::panels::{
-        lib::{Panel, PanelStates, random_color_with_opacity},
+        lib::{Panel, PanelStates, display_error_as_toast, random_color_with_opacity},
         media::WorkspaceSampleAttributes,
     },
 };
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2, vec2};
+use egui_toast::{Toast, ToastStyle};
 use indexmap::IndexMap;
 use parking_lot::RwLock;
 
@@ -46,6 +47,7 @@ pub struct SampleInstance {
     pub color: Color32,
     pub path: PathBuf,
     pub properties: SampleProperties,
+    pub waveform_map: Option<Vec<[f32; 2]>>,
 }
 
 impl TrackCustomization {
@@ -289,6 +291,7 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>) {
 
     // Handle the sample if it is dropped into the playlist.
     drop_sample(
+        _this,
         ui,
         state,
         global_state.clone(),
@@ -393,10 +396,74 @@ fn render_samples(
             egui::Color32::WHITE,
         );
 
-        ui.painter().rect_filled(galley.rect, 0., Color32::WHITE);
-
         // Allocate a response over the sample to capture any inputs it receives
         let sample_response = ui.allocate_rect(sample_rect, Sense::all());
+
+        // Draw the waveform of the sample
+        let waveform_rect = sample_rect.shrink2(vec2(0., galley.rect.height()));
+
+        // Only display the waveform if we actually have smth to display
+        if let Some(waveform) = &sample.waveform_map {
+            // Decide each columns width
+            let column_width = waveform_rect.width() / waveform.len() as f32;
+
+            let baseline_maximum_offset = waveform_rect.height() / 2.0;
+            let middle_y = waveform_rect.top() + baseline_maximum_offset;
+
+            // Fetch positions over sample
+            let start = Pos2::new(waveform_rect.left(), middle_y);
+            let end = Pos2::new(waveform_rect.right(), middle_y);
+
+            // Draw a centerline serving as the indication for silence.
+            ui.painter()
+                .line([start, end].to_vec(), Stroke::new(1.0_f32, Color32::WHITE));
+
+            // Iter over all the samples and draw them
+            // We are going to ratio this based on the highest/lowest value the output can get which is 1.0 and -1.0
+            // There for the top of this rect is going to serve as 1.0 and the bottom is -1.0
+
+            let mut idx = 0;
+            let scale_reference = waveform
+                .iter()
+                .flat_map(|[min, max]| [min.abs(), max.abs()])
+                .fold(0.0_f32, f32::max)
+                .max(f32::EPSILON);
+
+            // Draw all of the columns on the screen
+            while idx < waveform.len() {
+                // The maximum values goes on top of the baseline and the minimum below it
+                let [min, max] = waveform[idx];
+
+                // The x coordinate we are operation on
+                let x_offset = column_width * idx as f32;
+
+                let x = waveform_rect.left() + x_offset;
+
+                // Starting location of the column
+                let baseline = Pos2::new(x, middle_y);
+
+                let normalized_max = max / scale_reference;
+                let normalized_min = min / scale_reference;
+
+                // Height of the column we are drawing
+                let height_max = -normalized_max * baseline_maximum_offset;
+                let height_min = -normalized_min * baseline_maximum_offset;
+
+                // Draw max
+                ui.painter().line(
+                    [baseline, Pos2::new(x, middle_y + height_max)].to_vec(),
+                    Stroke::new(column_width, Color32::GREEN),
+                );
+                // Draw min
+                ui.painter().line(
+                    [baseline, Pos2::new(x, middle_y + height_min)].to_vec(),
+                    Stroke::new(column_width, Color32::GREEN),
+                );
+
+                // Increment index
+                idx += 1;
+            }
+        }
 
         // If the sample is dragged, simulate a dnd again
         sample_response.dnd_set_drag_payload(sample.clone());
@@ -409,6 +476,7 @@ fn render_samples(
 }
 
 fn drop_sample(
+    this: &Panel,
     ui: &mut Ui,
     state: &RwLock<PlaylistState>,
     global_state: Arc<PanelStates>,
@@ -446,41 +514,49 @@ fn drop_sample(
                 .get(&payload.path)
                 .cloned();
 
+            // Check if we already have this sample in the workspace tab
             let sample_instance = if let Some(sample_info) = query {
                 global_state
                     .media_panel
                     .write()
                     .workspace_selector
                     .workspace_samples
-                    .insert(
-                        payload.path.clone(),
-                        WorkspaceSampleAttributes {
-                            alias: payload.name.clone(),
-                            is_color_synced: sample_info.is_color_synced,
-                            color: {
-                                // If the color is synced return the color from the workspace query
-                                if sample_info.is_color_synced {
-                                    sample_info.color
-                                }
-                                // If the color is not synced then we can carry on using the current color
-                                else {
-                                    payload.color
-                                }
-                            },
-                        },
-                    );
+                    .get(&payload.path);
 
+                // If we do have this sample then insert into playlist accordingly
                 SampleInstance {
                     name: sample_info.alias.clone(),
-                    color: sample_info.color,
+                    color: {
+                        // If the color of this sample has been modified, the new color should be displayed when reinserted.
+                        if payload.color != sample_info.color {
+                            payload.color
+                        } else {
+                            sample_info.color
+                        }
+                    },
                     path: payload.path.clone(),
                     properties: payload.properties.clone(),
+                    waveform_map: sample_info.waveform_map,
                 }
             }
             // Initalize new sample in workspace
             // Generate a new random color for it
             else {
+                this.toasts.lock().add(
+                    Toast::new()
+                        .kind(egui_toast::ToastKind::Info)
+                        .text(format!("Imported sample `{}`", payload.name)),
+                );
+
+                // Map the waveforms of the sample if it hadnt been inserted yet
+                let waveform_map = display_error_as_toast(
+                    generate_sample_waveform(&payload.path),
+                    ToastStyle::default(),
+                    this.toasts.clone(),
+                );
+
                 let random_color = random_color_with_opacity(120);
+
                 global_state
                     .media_panel
                     .write()
@@ -494,6 +570,7 @@ fn drop_sample(
                             // All samples have their color synced by default.
                             is_color_synced: true,
                             color: random_color,
+                            waveform_map: waveform_map.clone(),
                         },
                     );
 
@@ -502,6 +579,7 @@ fn drop_sample(
                     color: random_color,
                     path: payload.path.clone(),
                     properties: payload.properties.clone(),
+                    waveform_map: waveform_map,
                 }
             };
 
