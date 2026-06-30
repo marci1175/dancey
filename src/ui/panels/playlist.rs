@@ -259,6 +259,9 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>) {
         idx += 1;
     }
 
+    // The space after the track labels
+    let usable_playlist_rect = playlist_rect.with_min_x(playlist_rect.min.x + TRACK_LABEL_WIDTH as f32);
+
     // Render currently present samples in the playlist
     // We should render the samples because when we are creating them we are also allocation responses
     // These responses would steal the input from the user if created after checking for input over the entire playlist.
@@ -268,7 +271,7 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>) {
         first_visible_track_idx,
         last_visible_track_idx,
         first_visible_beat,
-        playlist_rect,
+        usable_playlist_rect,
         &track_lines,
         &beat_lines,
     );
@@ -358,26 +361,24 @@ fn render_samples(
                 * BEAT_WIDTH as f32;
 
         // If the sample isn't long enough to reach onto the screen, skip it.
-        if start_pos + rectangle_length < playlist_rect.left() + TRACK_LABEL_WIDTH as f32 {
+        if start_pos + rectangle_length < playlist_rect.left() {
             continue;
         }
 
         // Create the rect where the sample might be rendered.
         let sample_rect = Rect::from_min_max(
             Pos2 {
-                x: start_pos.max(playlist_rect.left() + TRACK_LABEL_WIDTH as f32),
-                y: (track_lines[pos.track - before_first_visible_track_idx][0].y)
-                    .max(playlist_rect.top()),
+                x: start_pos,
+                y: (track_lines[pos.track - before_first_visible_track_idx][0].y),
             },
             Pos2 {
-                x: (start_pos + rectangle_length).min(playlist_rect.right()),
-                y: (track_lines[pos.track - before_first_visible_track_idx + 1][0].y)
-                    .min(playlist_rect.bottom()),
+                x: (start_pos + rectangle_length),
+                y: (track_lines[pos.track - before_first_visible_track_idx + 1][0].y),
             },
         );
 
         // Draw sample rect
-        ui.painter().rect_filled(sample_rect, 0., sample.color);
+        ui.painter().with_clip_rect(playlist_rect).rect_filled(sample_rect, 0., sample.color);
 
         // Create galley for sample label
         let galley = ui.fonts_mut(|f| {
@@ -390,7 +391,7 @@ fn render_samples(
         });
 
         // Draw sample text
-        ui.painter().with_clip_rect(sample_rect).galley(
+        ui.painter().with_clip_rect(playlist_rect).with_clip_rect(sample_rect).galley(
             sample_rect.left_top(),
             galley.clone(),
             egui::Color32::WHITE,
@@ -415,13 +416,12 @@ fn render_samples(
             let end = Pos2::new(waveform_rect.right(), middle_y);
 
             // Draw a centerline serving as the indication for silence.
-            ui.painter()
+            ui.painter().with_clip_rect(playlist_rect)
                 .line([start, end].to_vec(), Stroke::new(1.0_f32, Color32::WHITE));
 
             // Iter over all the samples and draw them
             // We are going to ratio this based on the highest/lowest value the output can get which is 1.0 and -1.0
             // There for the top of this rect is going to serve as 1.0 and the bottom is -1.0
-
             let mut idx = 0;
             let scale_reference = waveform
                 .iter()
@@ -450,14 +450,14 @@ fn render_samples(
                 let height_min = -normalized_min * baseline_maximum_offset;
 
                 // Draw max
-                ui.painter().line(
+                ui.painter().with_clip_rect(playlist_rect).line(
                     [baseline, Pos2::new(x, middle_y + height_max)].to_vec(),
-                    Stroke::new(column_width, Color32::GREEN),
+                    Stroke::new(column_width, Color32::WHITE),
                 );
                 // Draw min
-                ui.painter().line(
+                ui.painter().with_clip_rect(playlist_rect).line(
                     [baseline, Pos2::new(x, middle_y + height_min)].to_vec(),
-                    Stroke::new(column_width, Color32::GREEN),
+                    Stroke::new(column_width, Color32::WHITE),
                 );
 
                 // Increment index
