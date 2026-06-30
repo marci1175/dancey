@@ -1,4 +1,4 @@
-use dancey::{APP_NAME, app::Application};
+use beatroot::{APP_NAME, app::Application};
 use eframe::NativeOptions;
 
 #[tokio::main]

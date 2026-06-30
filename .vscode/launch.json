@@ -7,16 +7,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in library 'dancey'",
+            "name": "Debug unit tests in library 'Beatroot'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
                     "--lib",
-                    "--package=dancey"
+                    "--package=Beatroot"
                 ],
                 "filter": {
-                    "name": "dancey",
+                    "name": "Beatroot",
                     "kind": "lib"
                 }
             },
@@ -26,15 +26,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'dancey'",
+            "name": "Debug executable 'Beatroot'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=dancey",
-                    "--package=dancey"
+                    "--bin=Beatroot",
+                    "--package=Beatroot"
                 ],
                 "filter": {
-                    "name": "dancey",
+                    "name": "Beatroot",
                     "kind": "bin"
                 }
             },
@@ -44,16 +44,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'dancey'",
+            "name": "Debug unit tests in executable 'Beatroot'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--bin=dancey",
-                    "--package=dancey"
+                    "--bin=Beatroot",
+                    "--package=Beatroot"
                 ],
                 "filter": {
-                    "name": "dancey",
+                    "name": "Beatroot",
                     "kind": "bin"
                 }
             },

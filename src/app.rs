@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use eframe::{App, CreationContext};
+use egui::RichText;
 
-use crate::ui::panels::lib::{Panel, PanelStates, create_panels};
+use crate::{project_manager::open_project, ui::panels::lib::{Panel, PanelStates, create_panels}};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -12,6 +13,9 @@ pub struct Application {
 
     /// The list of panels that are present in the application.
     panels: Vec<Panel>,
+
+    /// Recently opened project's paths
+    recently_opened: Vec<PathBuf>,
 }
 
 impl Default for Application {
@@ -22,6 +26,8 @@ impl Default for Application {
 
             // Complete list of all of the panels of the application
             panels: create_panels(),
+
+            recently_opened: Vec::new(),
         }
     }
 }
@@ -47,11 +53,29 @@ impl App for Application {
         // Create the main options bar
         egui::Panel::top("application_options").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.menu_button("File", |_ui| {});
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().add_filter("Beatroot Project", &["btrt"]).pick_file() {
+
+                        }
+                    }
+                    if ui.button("Save As").clicked() {}
+                    if ui.button("Save").clicked() {}
+                    if ui.button("New Project").clicked() {}
+                    
+                    ui.menu_button("Open Recent", |ui| {
+                        for (idx, path) in self.recently_opened.iter().enumerate() {
+                            if ui.button(RichText::from(format!("{idx}. {}", path.display()))).clicked() {
+                                open_project(path);
+                            }
+                        }
+                    });
+                });
+
                 ui.menu_button("View", |_ui| {});
                 ui.menu_button("Plugins", |_ui| {});
                 ui.menu_button("Help", |_ui| {});
-                ui.menu_button("About", |_ui| {});
+                ui.menu_button("Settings", |_ui| {});
             });
         });
 
