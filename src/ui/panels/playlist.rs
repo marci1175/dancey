@@ -260,7 +260,8 @@ pub fn playlist_ui(_this: &Panel, ui: &mut Ui, global_state: Arc<PanelStates>) {
     }
 
     // The space after the track labels
-    let usable_playlist_rect = playlist_rect.with_min_x(playlist_rect.min.x + TRACK_LABEL_WIDTH as f32);
+    let usable_playlist_rect =
+        playlist_rect.with_min_x(playlist_rect.min.x + TRACK_LABEL_WIDTH as f32);
 
     // Render currently present samples in the playlist
     // We should render the samples because when we are creating them we are also allocation responses
@@ -378,7 +379,9 @@ fn render_samples(
         );
 
         // Draw sample rect
-        ui.painter().with_clip_rect(playlist_rect).rect_filled(sample_rect, 0., sample.color);
+        ui.painter()
+            .with_clip_rect(playlist_rect)
+            .rect_filled(sample_rect, 0., sample.color);
 
         // Create galley for sample label
         let galley = ui.fonts_mut(|f| {
@@ -391,11 +394,10 @@ fn render_samples(
         });
 
         // Draw sample text
-        ui.painter().with_clip_rect(playlist_rect).with_clip_rect(sample_rect).galley(
-            sample_rect.left_top(),
-            galley.clone(),
-            egui::Color32::WHITE,
-        );
+        ui.painter()
+            .with_clip_rect(playlist_rect)
+            .with_clip_rect(sample_rect)
+            .galley(sample_rect.left_top(), galley.clone(), egui::Color32::WHITE);
 
         // Allocate a response over the sample to capture any inputs it receives
         let sample_response = ui.allocate_rect(sample_rect, Sense::all());
@@ -416,7 +418,8 @@ fn render_samples(
             let end = Pos2::new(waveform_rect.right(), middle_y);
 
             // Draw a centerline serving as the indication for silence.
-            ui.painter().with_clip_rect(playlist_rect)
+            ui.painter()
+                .with_clip_rect(playlist_rect)
                 .line([start, end].to_vec(), Stroke::new(1.0_f32, Color32::WHITE));
 
             // Iter over all the samples and draw them

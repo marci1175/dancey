@@ -500,6 +500,7 @@ dependencies = [
  "indexmap",
  "lofty",
  "parking_lot",
+ "paste",
  "rand",
  "rfd",
  "rmp-serde",
